@@ -15,13 +15,21 @@ Three-class detection hierarchy (applied in order, first match wins):
   2. Breeding female    — title contains joining/pregnancy status qualifier (PTIC, NSM, AID, etc.)
   3. Commercial store   — weaners, yearlings, feeders, backgrounders, etc.
 
+Multi-user architecture (v2.3):
+  cattle_scout_config tab uses row-block-per-user layout.
+  Column A = user_id, Column B = setting, Column C = value.
+  load_config() returns a list of dicts — one per active user.
+  The main loop iterates over all users. Deduplication is per-user:
+  a listing that alerted User 1 will still alert User 2 if they match.
+  Each user has their own twilio_to field in their config block.
+
 Requires:
   - pip install python-dotenv
   - A .env file in the same folder containing TWILIO_* and GOOGLE_SHEETS_CREDS_FILE.
     See .env.example for the required variables.
 
 Author: Tom Flanagan
-Version: 2.2 — May 2026
+Version: 2.3 — May 2026
 """
 
 import os
@@ -100,13 +108,21 @@ BREEDING_FEMALE_QUALIFIERS = [
 def load_config(worksheet_config):
     """
     Reads the cattle_scout_config tab from Google Sheets.
-    Returns a dictionary of setting name → value.
-    Multi-value fields (comma-separated) are returned as lists.
-    Boolean fields (TRUE/FALSE) are returned as Python bools.
-    Numeric fields are returned as floats.
-    Raises RuntimeError if the Sheet cannot be read — config is required
-    to run, so we fail fast with a clear message rather than silently
-    continue with empty settings.
+
+    Tab layout (v2.3 multi-user):
+      Row 1: header — user_id | setting | value
+      Subsequent rows: one row per setting per user.
+      Column A = user_id (e.g. "tom", "user_002")
+      Column B = setting name
+      Column C = value
+
+    Returns a LIST of dicts — one dict per active user.
+    Each dict contains all settings for that user, plus:
+      "user_id"   — the user identifier string from column A
+      "twilio_to" — the user's WhatsApp number (required field)
+
+    Users with active = FALSE are excluded from the returned list.
+    Raises RuntimeError if the Sheet cannot be read.
     """
     try:
         rows = worksheet_config.get_all_values()
@@ -116,7 +132,7 @@ def load_config(worksheet_config):
             "Check your service account credentials and network connection."
         ) from e
 
-    config = {}
+    # Field type lookup tables — same as before, used when parsing each row's value
     list_fields = {
         "target_states", "target_classes", "target_breeds", "sale_types",
         "breeding_female_classes", "bull_breeds",
@@ -126,7 +142,6 @@ def load_config(worksheet_config):
         "active", "require_EU", "require_NE", "exclude_WHP",
         "include_breeding_females", "include_bulls", "include_stud",
         "include_cow_calf_units", "bull_require_EBV", "require_vendor",
-        # v2.0 quality filters
         "require_HGP_free", "require_polled", "require_quiet",
     }
     numeric_fields = {
@@ -142,28 +157,51 @@ def load_config(worksheet_config):
         "bull_EBV_SS_min", "bull_EBV_SRI_min", "bull_EBV_beef_value_min"
     }
 
+    # Build a dict-of-dicts keyed by user_id while reading rows.
+    # We preserve insertion order so users alert in the order they appear in the Sheet.
+    raw_users = {}   # { user_id: { setting: parsed_value, ... } }
+
     for row in rows[1:]:   # skip header row
-        if len(row) < 2:
+        # Each row must have at least 3 columns: user_id | setting | value
+        if len(row) < 3:
             continue
-        key   = row[0].strip()
-        value = row[1].strip()
-        if not key or not value:
+        user_id = row[0].strip()
+        key     = row[1].strip()
+        value   = row[2].strip()
+        if not user_id or not key or not value:
             continue
 
+        # Initialise the user's dict on first encounter
+        if user_id not in raw_users:
+            raw_users[user_id] = {"user_id": user_id}
+
+        # Parse the value into the correct Python type
         if key in list_fields:
-            config[key] = [v.strip().lower() for v in value.split(",") if v.strip()]
+            raw_users[user_id][key] = [v.strip().lower() for v in value.split(",") if v.strip()]
         elif key in bool_fields:
-            config[key] = value.upper() == "TRUE"
+            raw_users[user_id][key] = value.upper() == "TRUE"
         elif key in numeric_fields:
             try:
-                config[key] = float(value)
+                raw_users[user_id][key] = float(value)
             except ValueError:
-                config[key] = None
+                raw_users[user_id][key] = None
         else:
-            config[key] = value
+            raw_users[user_id][key] = value
 
-    print(f"Config loaded: {config}")
-    return config
+    # Filter out inactive users and validate required fields.
+    # twilio_to is mandatory — a user without it cannot receive alerts.
+    active_users = []
+    for user_id, cfg in raw_users.items():
+        if not cfg.get("active", True):
+            print(f"  Config: user '{user_id}' is inactive — skipping.")
+            continue
+        if not cfg.get("twilio_to"):
+            print(f"  ⚠️  Config: user '{user_id}' has no twilio_to — skipping.")
+            continue
+        active_users.append(cfg)
+
+    print(f"Config loaded: {len(active_users)} active user(s): {[u['user_id'] for u in active_users]}")
+    return active_users
 
 
 # ─────────────────────────────────────────────
@@ -1417,21 +1455,41 @@ def listing_match(listing, config):
 # ─────────────────────────────────────────────
 
 def get_log_status(worksheet):
-    """Returns a dict of {url: status} from the log sheet."""
+    """
+    Returns a dict of {(url, user_id): status} from the log sheet.
+
+    Keyed on the tuple (url, user_id) so that deduplication is per-user:
+    a listing that alerted User 1 will still alert User 2 if they match.
+
+    Column A = user_id (v2.3 — prepended; was url in v2.2)
+    Column B = url
+    Column C = status
+    """
     try:
         rows = worksheet.get_all_values()
         status_map = {}
-        for row in rows[1:]:
-            if len(row) >= 2:
-                status_map[row[0]] = row[1]
+        for row in rows[1:]:   # skip header
+            if len(row) >= 3:
+                user_id = row[0]
+                url     = row[1]
+                status  = row[2]
+                status_map[(url, user_id)] = status
         return status_map
     except Exception as e:
         print(f"  ⚠️  Could not read log: {e}")
         return {}
 
 
-def log_listing(worksheet, listing, status, flag=None):
-    """Adds a lean 18-column row to cattle_scout_log (deduplication and audit trail)."""
+def log_listing(worksheet, listing, status, user_id, flag=None):
+    """
+    Adds a lean row to cattle_scout_log (deduplication and audit trail).
+
+    Column layout (v2.3 — user_id prepended):
+      A: user_id  B: url  C: status  D: title  E: category  F: class
+      G: breed  H: head  I: avg_weight  J: weight_range  K: fat_score
+      L: age  M: accreditations  N: price_c_kg  O: location  P: vendor
+      Q: sale_date  R: flag  S: logged_at
+    """
     accreds = " ".join(filter(None, [
         "EU"  if listing["is_EU"]   else "",
         "NE"  if listing["is_NE"]   else "",
@@ -1439,64 +1497,61 @@ def log_listing(worksheet, listing, status, flag=None):
     ]))
     calf_info = f" (+{listing['num_calves']} calves)" if listing.get("num_calves") else ""
     row = [
-        listing["url"],
-        status,
-        listing["title"],
-        listing["listing_category"],
-        listing["class"],
-        listing["breed"],
-        str(listing["num_head"]) + calf_info,
-        listing["avg_weight_kg"],
-        listing["weight_range_kg"],
-        listing["fat_score"],
-        f"{listing['age_min_months']}–{listing['age_max_months']}mo" if listing["age_min_months"] else "",
-        accreds,
-        listing["price_c_kg"],
-        listing["location"],
-        listing["vendor"],
-        listing["sale_date"],
-        flag or "",
-        datetime.now().strftime("%Y-%m-%d %H:%M"),
+        user_id,                                                                    # A  user_id
+        listing["url"],                                                             # B  url
+        status,                                                                     # C  status
+        listing["title"],                                                           # D  title
+        listing["listing_category"],                                                # E  category
+        listing["class"],                                                           # F  class
+        listing["breed"],                                                           # G  breed
+        str(listing["num_head"]) + calf_info,                                       # H  head
+        listing["avg_weight_kg"],                                                   # I  avg_weight
+        listing["weight_range_kg"],                                                 # J  weight_range
+        listing["fat_score"],                                                       # K  fat_score
+        f"{listing['age_min_months']}–{listing['age_max_months']}mo" if listing["age_min_months"] else "",  # L age
+        accreds,                                                                    # M  accreditations
+        listing["price_c_kg"],                                                      # N  price_c_kg
+        listing["location"],                                                        # O  location
+        listing["vendor"],                                                          # P  vendor
+        listing["sale_date"],                                                       # Q  sale_date
+        flag or "",                                                                 # R  flag
+        datetime.now().strftime("%Y-%m-%d %H:%M"),                                  # S  logged_at
     ]
     try:
-        # table_range="A1" anchors the append to the column-A table, so each new
-        # row starts at column A. Without this, gspread uses the sheet's last used
-        # cell as the anchor, which causes rows to drift rightward over time.
         worksheet.append_row(row, table_range="A1")
     except Exception as e:
-        # First attempt failed — most likely a connection reset mid-run.
-        # Wait 10 seconds for the TCP session to recover, then try once more.
         print(f"  ⚠️  Log write failed for {listing['url']}: {e} — retrying in 10s...")
         time.sleep(10)
         try:
             worksheet.append_row(row, table_range="A1")
             print(f"  ✅  Log write succeeded on retry: {listing['url']}")
         except Exception as e2:
-            # Retry also failed — print URL so you can add the row manually.
-            # The alert has already fired; without this row the listing will
-            # re-alert on the next run.
             print(
                 f"  ⚠️  Log write FAILED after retry for {listing['url']}: {e2}\n"
                 f"  Add this row to cattle_scout_log manually to prevent duplicate alert."
             )
 
 
-def log_listing_full(worksheet, listing, status, flag, fair_value):
+def log_listing_full(worksheet, listing, status, flag, fair_value, user_id):
     """
-    Writes the full 44-column field set to cattle_scout_listings.
+    Writes the full 45-column field set to cattle_scout_listings.
     One row per alerted listing — append-only, never updated in place.
 
-    Parallel to log_listing() but writes to the analytical dataset tab.
-    Purpose: Cattle Model training data, Alert History for web interface, analytics.
-
-    Booleans written as "TRUE"/"FALSE" strings for Sheets compatibility.
-    HGP_free written as "" when None (unknown) — distinct from FALSE (HGP treated).
-    None values written as empty string "".
-    breed_groups written as pipe-separated string if list (e.g. "Angus|Hereford Cross").
+    Column layout (v2.3 — user_id prepended to column A, all others shift right):
+      A: user_id  B: url  C: logged_at  D: status  E: sale_name  F: sale_date
+      G: lot_number  H: listing_category  I: class  J: title  K: num_head
+      L: state  M: location  N: vendor  O: breed  P: breed_groups
+      Q: avg_weight_kg  R: weight_at_assessment_kg  S: weight_min  T: weight_max
+      U: weight_range_kg  V: delivery_adjustment_pct  W: liveweight_gain_per_day
+      X: dressing_pct  Y: fat_score  Z: age_min_months  AA: age_max_months
+      AB: hours_off_feed  AC: assessment_date  AD: horn_status  AE: temperament
+      AF: store_condition  AG: is_EU  AH: is_NE  AI: is_LPA  AJ: is_MSA
+      AK: has_WHP  AL: HGP_free  AM: lifetime_traceable_pct  AN: price_per_head
+      AO: price_c_kg  AP: sale_type_pricing  AQ: valuation_flag
+      AR: fair_value_at_alert  AS: catalogue_pending
     """
     def b(val):
-        # Convert Python bool to Sheets-compatible string.
-        # None → "" (unknown/not declared — distinct from FALSE).
+        # Python bool → Sheets string. None → "" (unknown, distinct from FALSE).
         if val is True:
             return "TRUE"
         if val is False:
@@ -1507,13 +1562,10 @@ def log_listing_full(worksheet, listing, status, flag, fair_value):
         # None → empty string; everything else passes through unchanged.
         return "" if val is None else val
 
-    # breed_groups is a list of tuples [(head, sire, dam), ...] from the parser.
-    # Serialise as pipe-separated sire breed names for readability in Sheets.
     breed_groups_str = ""
     if listing.get("breed_groups"):
         bg = listing["breed_groups"]
         if isinstance(bg, list) and len(bg) > 0:
-            # Each element is (head_count, sire_breed, dam_breed)
             if isinstance(bg[0], tuple):
                 breed_groups_str = "|".join(f"{sire}/{dam}" for _, sire, dam in bg)
             else:
@@ -1522,50 +1574,51 @@ def log_listing_full(worksheet, listing, status, flag, fair_value):
             breed_groups_str = bg
 
     row = [
-        listing["url"],                                     # A  url
-        datetime.now().strftime("%Y-%m-%d %H:%M"),          # B  logged_at
-        status,                                             # C  status
-        n(listing.get("sale_name")),                        # D  sale_name
-        n(listing.get("sale_date")),                        # E  sale_date
-        n(listing.get("lot_number")),                       # F  lot_number
-        n(listing.get("listing_category")),                 # G  listing_category
-        n(listing.get("class")),                            # H  class
-        n(listing.get("title")),                            # I  title
-        n(listing.get("num_head")),                         # J  num_head
-        n(listing.get("state")),                            # K  state
-        n(listing.get("location")),                         # L  location
-        n(listing.get("vendor")),                           # M  vendor
-        n(listing.get("breed")),                            # N  breed
-        breed_groups_str,                                   # O  breed_groups
-        n(listing.get("avg_weight_kg")),                    # P  avg_weight_kg
-        n(listing.get("weight_at_assessment_kg")),          # Q  weight_at_assessment_kg
-        n(listing.get("weight_min")),                       # R  weight_min
-        n(listing.get("weight_max")),                       # S  weight_max
-        n(listing.get("weight_range_kg")),                  # T  weight_range_kg
-        n(listing.get("delivery_adjustment_pct")),          # U  delivery_adjustment_pct
-        n(listing.get("liveweight_gain_per_day")),          # V  liveweight_gain_per_day
-        n(listing.get("dressing_pct")),                     # W  dressing_pct
-        n(listing.get("fat_score")),                        # X  fat_score
-        n(listing.get("age_min_months")),                   # Y  age_min_months
-        n(listing.get("age_max_months")),                   # Z  age_max_months
-        n(listing.get("hours_off_feed")),                   # AA hours_off_feed
-        n(listing.get("assessment_date")),                  # AB assessment_date
-        n(listing.get("horn_status")),                      # AC horn_status
-        n(listing.get("temperament")),                      # AD temperament
-        n(listing.get("store_condition")),                  # AE store_condition
-        b(listing.get("is_EU")),                            # AF is_EU
-        b(listing.get("is_NE")),                            # AG is_NE
-        b(listing.get("is_LPA")),                           # AH is_LPA
-        b(listing.get("is_MSA")),                           # AI is_MSA
-        b(listing.get("has_WHP")),                          # AJ has_WHP
-        b(listing.get("HGP_free")),                         # AK HGP_free (None → "" = unknown)
-        n(listing.get("lifetime_traceable_pct")),           # AL lifetime_traceable_pct
-        n(listing.get("price_per_head")),                   # AM price_per_head
-        n(listing.get("price_c_kg")),                       # AN price_c_kg
-        n(listing.get("sale_type_pricing")),                # AO sale_type_pricing
-        flag or "No valuation",                             # AP valuation_flag
-        n(fair_value),                                      # AQ fair_value_at_alert
-        b(listing.get("catalogue_pending")),                # AR catalogue_pending
+        user_id,                                            # A  user_id
+        listing["url"],                                     # B  url
+        datetime.now().strftime("%Y-%m-%d %H:%M"),          # C  logged_at
+        status,                                             # D  status
+        n(listing.get("sale_name")),                        # E  sale_name
+        n(listing.get("sale_date")),                        # F  sale_date
+        n(listing.get("lot_number")),                       # G  lot_number
+        n(listing.get("listing_category")),                 # H  listing_category
+        n(listing.get("class")),                            # I  class
+        n(listing.get("title")),                            # J  title
+        n(listing.get("num_head")),                         # K  num_head
+        n(listing.get("state")),                            # L  state
+        n(listing.get("location")),                         # M  location
+        n(listing.get("vendor")),                           # N  vendor
+        n(listing.get("breed")),                            # O  breed
+        breed_groups_str,                                   # P  breed_groups
+        n(listing.get("avg_weight_kg")),                    # Q  avg_weight_kg
+        n(listing.get("weight_at_assessment_kg")),          # R  weight_at_assessment_kg
+        n(listing.get("weight_min")),                       # S  weight_min
+        n(listing.get("weight_max")),                       # T  weight_max
+        n(listing.get("weight_range_kg")),                  # U  weight_range_kg
+        n(listing.get("delivery_adjustment_pct")),          # V  delivery_adjustment_pct
+        n(listing.get("liveweight_gain_per_day")),          # W  liveweight_gain_per_day
+        n(listing.get("dressing_pct")),                     # X  dressing_pct
+        n(listing.get("fat_score")),                        # Y  fat_score
+        n(listing.get("age_min_months")),                   # Z  age_min_months
+        n(listing.get("age_max_months")),                   # AA age_max_months
+        n(listing.get("hours_off_feed")),                   # AB hours_off_feed
+        n(listing.get("assessment_date")),                  # AC assessment_date
+        n(listing.get("horn_status")),                      # AD horn_status
+        n(listing.get("temperament")),                      # AE temperament
+        n(listing.get("store_condition")),                  # AF store_condition
+        b(listing.get("is_EU")),                            # AG is_EU
+        b(listing.get("is_NE")),                            # AH is_NE
+        b(listing.get("is_LPA")),                           # AI is_LPA
+        b(listing.get("is_MSA")),                           # AJ is_MSA
+        b(listing.get("has_WHP")),                          # AK has_WHP
+        b(listing.get("HGP_free")),                         # AL HGP_free (None → "" = unknown)
+        n(listing.get("lifetime_traceable_pct")),           # AM lifetime_traceable_pct
+        n(listing.get("price_per_head")),                   # AN price_per_head
+        n(listing.get("price_c_kg")),                       # AO price_c_kg
+        n(listing.get("sale_type_pricing")),                # AP sale_type_pricing
+        flag or "No valuation",                             # AQ valuation_flag
+        n(fair_value),                                      # AR fair_value_at_alert
+        b(listing.get("catalogue_pending")),                # AS catalogue_pending
     ]
 
     try:
@@ -1615,12 +1668,14 @@ def score_listing(listing, fair_value_c_kg):
 # STEP 10 — WHATSAPP ALERTS
 # ─────────────────────────────────────────────
 
-def send_watching_alert(listing):
+def send_watching_alert(listing, twilio_to):
     """
     Stage 1 WATCHING alert — catalogue not yet released.
     Sends lightweight pre-catalogue notification: class, head count, location, sale date.
     Weight, breed, fat score and age are not yet available — full alert follows
     when catalogue releases and the lot is re-processed.
+
+    twilio_to: the recipient's WhatsApp number for this specific user.
     """
     calf_line = f" · {listing['num_calves']} calves at foot" if listing.get("num_calves") else ""
     message = (
@@ -1636,16 +1691,18 @@ def send_watching_alert(listing):
         return
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        client.messages.create(body=message, from_=TWILIO_FROM, to=TWILIO_TO)
+        client.messages.create(body=message, from_=TWILIO_FROM, to=twilio_to)
         print(f"  👁  Watching alert sent: {listing['title']}")
     except Exception as e:
         print(f"  ⚠️  Watching alert FAILED for {listing['title']}: {e}")
 
 
-def send_alert(listing, flag, fair_value_c_kg):
+def send_alert(listing, flag, fair_value_c_kg, twilio_to):
     """
     Single alert function. Sends full listing details.
     Fields that the parser could not populate are omitted cleanly.
+
+    twilio_to: the recipient's WhatsApp number for this specific user.
     """
     flag_line  = f"{flag} — " if flag else ""
     calf_line  = f" · {listing['num_calves']} calves at foot" if listing.get("num_calves") else ""
@@ -1715,7 +1772,7 @@ def send_alert(listing, flag, fair_value_c_kg):
         return
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        client.messages.create(body=message, from_=TWILIO_FROM, to=TWILIO_TO)
+        client.messages.create(body=message, from_=TWILIO_FROM, to=twilio_to)
         print(f"  🐄  Alert sent: {listing['title']}")
     except Exception as e:
         print(f"  ⚠️  Alert FAILED for {listing['title']}: {e}")
@@ -1732,12 +1789,10 @@ def main():
     print("=" * 60)
 
     # Fail fast if any required credential is missing from .env.
-    # This prevents cryptic Twilio/Google errors deep in the run.
     required_vars = {
         "TWILIO_ACCOUNT_SID":       TWILIO_ACCOUNT_SID,
         "TWILIO_AUTH_TOKEN":        TWILIO_AUTH_TOKEN,
         "TWILIO_FROM":              TWILIO_FROM,
-        "TWILIO_TO":                TWILIO_TO,
         "GOOGLE_SHEETS_CREDS_FILE": GOOGLE_SHEETS_CREDS_FILE,
     }
     missing = [k for k, v in required_vars.items() if not v]
@@ -1757,16 +1812,17 @@ def main():
     spreadsheet = gc.open(SPREADSHEET_NAME)
 
     worksheet_log      = spreadsheet.worksheet(LOG_TAB)
-    worksheet_listings = spreadsheet.worksheet(LISTINGS_TAB)   # v2.2: full analytical dataset
+    worksheet_listings = spreadsheet.worksheet(LISTINGS_TAB)
     worksheet_config   = spreadsheet.worksheet(CONFIG_TAB)
     worksheet_model    = spreadsheet.worksheet(MODEL_TAB)
 
     # Write header row to cattle_scout_listings on first run.
-    # Checks cell A1 — if it already contains "url" the header exists, skip.
-    # This means you don't need to manually set up the tab header.
-    if worksheet_listings.acell("A1").value != "url":
+    # Checks cell A1 — if it already contains "user_id" the header exists, skip.
+    # v2.3: user_id is now column A; all other columns shift right by one.
+    if worksheet_listings.acell("A1").value != "user_id":
         worksheet_listings.append_row(
             [
+                "user_id",
                 "url", "logged_at", "status", "sale_name", "sale_date",
                 "lot_number", "listing_category", "class", "title", "num_head",
                 "state", "location", "vendor", "breed", "breed_groups",
@@ -1784,66 +1840,97 @@ def main():
         )
         print("cattle_scout_listings header row written.")
 
-    config = load_config(worksheet_config)
+    # Load all active user configs from the Sheet.
+    # Returns a list of dicts — one per active user with a valid twilio_to.
+    all_users = load_config(worksheet_config)
 
-    if not config.get("active", True):
-        print("Config 'active' is FALSE — exiting.")
+    if not all_users:
+        print("No active users found in config — exiting.")
         return
 
+    # Load the dedup log once — keyed on (url, user_id) so each user's
+    # alert history is independent. A listing seen by User 1 can still
+    # alert User 2 if it matches their criteria.
     log_status = get_log_status(worksheet_log)
     print(f"Log entries: {len(log_status)}")
 
+    # Read the model fair value once — same value applies to all users.
     fair_value = get_model_fair_value(worksheet_model)
     print(f"Model fair value: {fair_value}c/kg lwt" if fair_value else "Model fair value: not available.")
 
+    # Scrape listing URLs once — same URL set is evaluated for all users.
     listing_urls = get_listing_urls()
 
-    alerts_sent   = 0
-    watching_sent = 0
+    # ── Outer loop: iterate over each active user ──
+    # For each user we run the full filter and alert pipeline independently.
+    total_alerts   = 0
+    total_watching = 0
 
-    for url in listing_urls:
-        existing_status = log_status.get(url)
+    for user_config in all_users:
+        user_id   = user_config["user_id"]
+        twilio_to = user_config["twilio_to"]
 
-        if existing_status == "ALERTED":
-            print(f"  Skipping (already alerted): {url}")
+        print(f"\n{'─' * 40}")
+        print(f"Processing user: {user_id}")
+        print(f"{'─' * 40}")
+
+        if not user_config.get("active", True):
+            # Redundant safety check — load_config already excludes inactive users,
+            # but belt-and-braces given the consequence of mis-alerting.
+            print(f"  User '{user_id}' inactive — skipping.")
             continue
 
-        listing = scrape_listing(url, config)
-        time.sleep(REQUEST_DELAY)
+        alerts_sent   = 0
+        watching_sent = 0
 
-        if not listing:
-            continue
+        for url in listing_urls:
+            # Per-user dedup: check (url, user_id) tuple in the log.
+            existing_status = log_status.get((url, user_id))
 
-        matched, reason = listing_match(listing, config)
-        if not matched:
-            print(
-                f"  No match [{reason}]: {listing['title']} "
-                f"({listing['state']} · {listing['listing_category']} · "
-                f"{listing['class']} · {listing['num_head']} head)"
-            )
-            continue
+            if existing_status == "ALERTED":
+                print(f"  Skipping (already alerted {user_id}): {url}")
+                continue
 
-        # ── Two-stage alert logic ──
-        # Stage 1 (WATCHING): catalogue not yet released — pre-catalogue criteria
-        # passed, send lightweight alert so buyer knows lot exists.
-        # Stage 2 (ALERT): catalogue live — all criteria confirmed, send full alert.
-        if listing["catalogue_pending"]:
-            if existing_status != "WATCHING":
-                send_watching_alert(listing)
-                log_listing(worksheet_log, listing, "WATCHING")
-                log_listing_full(worksheet_listings, listing, "WATCHING", None, None)
-                watching_sent += 1
+            listing = scrape_listing(url, user_config)
+            time.sleep(REQUEST_DELAY)
+
+            if not listing:
+                continue
+
+            matched, reason = listing_match(listing, user_config)
+            if not matched:
+                print(
+                    f"  No match [{reason}]: {listing['title']} "
+                    f"({listing['state']} · {listing['listing_category']} · "
+                    f"{listing['class']} · {listing['num_head']} head)"
+                )
+                continue
+
+            # ── Two-stage alert logic ──
+            if listing["catalogue_pending"]:
+                if existing_status != "WATCHING":
+                    send_watching_alert(listing, twilio_to)
+                    log_listing(worksheet_log, listing, "WATCHING", user_id)
+                    log_listing_full(worksheet_listings, listing, "WATCHING", None, None, user_id)
+                    # Update local log_status so subsequent users in this run see the write.
+                    log_status[(url, user_id)] = "WATCHING"
+                    watching_sent += 1
+                else:
+                    print(f"  Already watching ({user_id}): {listing['title']}")
             else:
-                print(f"  Already watching: {listing['title']}")
-        else:
-            flag = score_listing(listing, fair_value)
-            send_alert(listing, flag, fair_value)
-            log_listing(worksheet_log, listing, "ALERTED", flag or "No valuation")
-            log_listing_full(worksheet_listings, listing, "ALERTED", flag, fair_value)
-            alerts_sent += 1
+                flag = score_listing(listing, fair_value)
+                send_alert(listing, flag, fair_value, twilio_to)
+                log_listing(worksheet_log, listing, "ALERTED", user_id, flag or "No valuation")
+                log_listing_full(worksheet_listings, listing, "ALERTED", flag, fair_value, user_id)
+                log_status[(url, user_id)] = "ALERTED"
+                alerts_sent += 1
+
+        print(f"  User '{user_id}' — Watching: {watching_sent}. Alerts: {alerts_sent}.")
+        total_alerts   += alerts_sent
+        total_watching += watching_sent
 
     print("=" * 60)
-    print(f"Run complete. Watching: {watching_sent}. Alerts: {alerts_sent}.")
+    print(f"Run complete. Users: {len(all_users)}. Watching: {total_watching}. Alerts: {total_alerts}.")
     print("=" * 60)
 
 
