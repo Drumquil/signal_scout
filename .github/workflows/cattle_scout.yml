@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 gspread oauth2client twilio python-dotenv
+        run: pip install -r requirements.txt
 
       - name: Write Google credentials file
         run: echo '${{ secrets.GOOGLE_SHEETS_CREDS }}' > google_credentials.json
