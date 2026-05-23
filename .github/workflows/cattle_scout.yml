@@ -1,0 +1,35 @@
+yamlname: Signal Scout
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 7am AEST (UTC+10) — GitHub cron runs in UTC
+    - cron: '0 3 * * *'    # 1pm AEST (UTC+10)
+  workflow_dispatch:         # allows manual trigger from GitHub UI
+
+jobs:
+  run-scout:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 gspread oauth2client twilio python-dotenv
+
+      - name: Write Google credentials file
+        run: echo '${{ secrets.GOOGLE_SHEETS_CREDS }}' > google_credentials.json
+
+      - name: Run Signal Scout
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          TWILIO_TO: ${{ secrets.TWILIO_TO }}
+          GOOGLE_SHEETS_CREDS_FILE: google_credentials.json
+        run: python cattle_scout.py
