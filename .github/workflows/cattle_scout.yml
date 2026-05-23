@@ -1,4 +1,4 @@
-yamlname: Signal Scout
+name: Signal Scout
 
 on:
   schedule:
