@@ -1,0 +1,51 @@
+Setting,Value
+active,TRUE
+target_states,"NSW, QLD"
+target_classes,"Weaned, Weaner, Vealer, Calf, Yearling, Backgrounder, Store, Feeder, Steer, Heifer"
+target_breeds,"Angus, Hereford, Angus Cross, Hereford Cross"
+min_head,20
+max_head,100
+min_weight_kg,180
+max_weight_kg,380
+max_weight_range_kg,100
+fat_score_max,2
+age_min_months,6
+age_max_months,18
+require_EU,FALSE
+require_NE,FALSE
+exclude_WHP,FALSE
+sale_types,"Weaner & Yearling Sale, Eastern States Cattle Sale"
+include_breeding_females,FALSE
+breeding_female_classes,"PTIC, NSM, CAF, Cow, Maiden, Joining"
+include_bulls,FALSE
+bull_breeds,"Angus, Brangus, Ultrablack"
+bull_min_age_months,12
+bull_max_age_months,36
+bull_min_weight_kg,400
+bull_max_weight_kg,900
+bull_max_price_per_head,
+bull_min_fat_score,2
+bull_max_fat_score,4
+bull_require_EBV,FALSE
+bull_EBV_BWT_max,
+bull_EBV_200DG_min,
+bull_EBV_400DW_min,
+bull_EBV_600DW_min,
+bull_EBV_MILK_min,
+bull_EBV_DTC_max,
+bull_EBV_DOC_min,
+bull_EBV_CWT_min,
+bull_EBV_EMA_min,
+bull_EBV_MARB_min,
+bull_EBV_RIB_min,
+bull_EBV_SS_min,
+bull_EBV_SRI_min,
+bull_EBV_beef_value_min,
+include_stud,FALSE
+max_price_per_head,
+min_fat_score,1
+require_vendor,FALSE
+preferred_vendors,
+exclude_vendors,
+states_breeding,"NSW, QLD"
+states_bulls,"NSW, QLD, VIC"

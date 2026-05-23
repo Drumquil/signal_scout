@@ -1,0 +1,27 @@
+# Credentials — never commit these
+.env
+google_credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Archive and zip files
+*.zip
+
+# Superseded documents — keep only current versions in repo
+files/
+Cattle_Scout_Checkpoint_Chat7_to_Chat8.md
+Cattle_Scout_Project_State_v1_6.md
+Cattle_Scout_Web_Interface_Build_Plan_v1_0.docx
+Australian_Cattle_Listing_Platforms_Reference_v1_0.docx
+Drumquil_Signal_Cybersecurity_IP_Reference_v1_0.docx
+Drumquil_Signal_Cybersecurity_IP_Reference_v1_1.docx
