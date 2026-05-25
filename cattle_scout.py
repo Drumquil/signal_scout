@@ -1106,6 +1106,24 @@ def scrape_commercial_listing(url, soup, page_text):
         if sale_type_pricing:
             break
 
+    # ── Sex detection ──
+    # Derived from detected_class first (unambiguous), then title scan (for
+    # mixed-sex class terms like "weaned", "yearling", "backgrounder", etc.).
+    # Returns "steer", "heifer", "mixed", or None (unknown — filter passes through).
+    title_lower_sex = title.lower()
+    if detected_class in ("steer",):
+        detected_sex = "steer"
+    elif detected_class in ("heifer",):
+        detected_sex = "heifer"
+    elif any(t in title_lower_sex for t in ("mixed sex", "mixed sexes")):
+        detected_sex = "mixed"
+    elif re.search(r"\bsteers?\b", title_lower_sex):
+        detected_sex = "steer"
+    elif re.search(r"\bheifers?\b", title_lower_sex):
+        detected_sex = "heifer"
+    else:
+        detected_sex = None   # unknown — sex filter will pass through
+
     return {
         # ── Metadata ──
         "listing_type":             "commercial",
@@ -1125,6 +1143,7 @@ def scrape_commercial_listing(url, soup, page_text):
         "state":                    state,
         "location":                 location,
         "class":                    detected_class,
+        "sex":                      detected_sex,       # steer/heifer/mixed/None
 
         # ── Breed & physical traits ──
         "breed":                    detected_breed,
@@ -1349,6 +1368,16 @@ def listing_match(listing, config):
         active_classes = list(config.get("target_classes", []))
         if active_classes and not any(tc in listing_class for tc in active_classes):
             return False, f"class={listing['class']!r} not in target_classes"
+
+    # ── Sex filter — soft gate ──
+    # Only applied when target_sex is "steer" or "heifer" (not "either" or blank).
+    # If the parser could not determine sex (detected_sex is None), pass through —
+    # silent misses are worse than false positives for a buy-side alert tool.
+    target_sex = config.get("target_sex", "").lower().strip()
+    if target_sex and target_sex != "either":
+        detected_sex = listing.get("sex")
+        if detected_sex is not None and detected_sex != target_sex:
+            return False, f"sex={detected_sex!r} != target_sex={target_sex!r}"
 
     # ── Head count ──
     head_count = listing["num_head"]
