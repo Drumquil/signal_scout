@@ -33,12 +33,14 @@ Version: 2.3 — May 2026
 """
 
 import os
+import sys
 import requests
 from bs4 import BeautifulSoup
 import time
 import re
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from gspread.exceptions import WorksheetNotFound
 from twilio.rest import Client
 from datetime import datetime
 from dotenv import load_dotenv
@@ -46,6 +48,13 @@ from dotenv import load_dotenv
 # Load credentials from the .env file in the same folder.
 # Must run BEFORE any os.getenv() calls below.
 load_dotenv()
+
+# Force UTF-8 stdout/stderr on Windows consoles that default to cp1252.
+# Prevents UnicodeEncodeError when printing box-drawing chars or emojis.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ─────────────────────────────────────────────
 # CREDENTIALS — loaded from .env (never hardcoded)
@@ -70,10 +79,11 @@ LISTINGS_TAB     = "cattle_scout_listings"   # v2.2: full analytical dataset tab
 CONFIG_TAB       = "cattle_scout_config"
 MODEL_TAB        = "cattle_model_output"
 
-# AuctionsPlus search — broad national scope, filtering done in script not URL
+# AuctionsPlus search — steer/heifer category; regional and buyer filtering done in script
 SEARCH_URL = (
     "https://auctionsplus.com.au/browse/livestock/cattle"
-    "?mapView=0"
+    "?category=Steer-Heifer"
+    "&mapView=0"
 )
 
 MAX_PAGES     = 5
@@ -81,6 +91,102 @@ REQUEST_DELAY = 3
 TEST_MODE     = True    # Set to False when ready for production
 UNDERVALUED_THRESHOLD = 0.10
 OVERVALUED_THRESHOLD  = 0.10
+
+# ─────────────────────────────────────────────
+# GOOGLE SHEETS TAB SCHEMAS (v2.3)
+# ─────────────────────────────────────────────
+
+LOG_HEADER_V23 = [
+    "user_id", "url", "status", "title", "category", "class", "breed", "head",
+    "avg_weight_kg", "weight_range_kg", "fat_score", "age", "accreditations",
+    "price_c_kg", "location", "vendor", "sale_date", "flag", "logged_at",
+]
+
+LOG_HEADER_DISPLAY_V23 = [
+    "user_id", "URL", "Status", "Title", "Category", "Class", "Breed", "Head",
+    "Avg Weight", "Weight Range", "Fat Score", "Age", "Accreditations",
+    "Price c/kg", "Location", "Vendor", "Sale Date", "Flag", "Logged At",
+]
+
+LISTINGS_HEADER_V23 = [
+    "user_id",
+    "url", "logged_at", "status", "sale_name", "sale_date",
+    "lot_number", "listing_category", "class", "title", "num_head",
+    "state", "location", "vendor", "breed", "breed_groups",
+    "avg_weight_kg", "weight_at_assessment_kg", "weight_min",
+    "weight_max", "weight_range_kg", "delivery_adjustment_pct",
+    "liveweight_gain_per_day", "dressing_pct", "fat_score",
+    "age_min_months", "age_max_months", "hours_off_feed",
+    "assessment_date", "horn_status", "temperament",
+    "store_condition", "is_EU", "is_NE", "is_LPA", "is_MSA",
+    "has_WHP", "HGP_free", "lifetime_traceable_pct",
+    "price_per_head", "price_c_kg", "sale_type_pricing",
+    "valuation_flag", "fair_value_at_alert", "catalogue_pending",
+]
+
+LISTINGS_HEADER_NO_USER_ID = LISTINGS_HEADER_V23[1:]
+
+
+def get_or_create_worksheet(spreadsheet, title, rows, cols):
+    """Get a worksheet by title, or create it if missing."""
+    try:
+        return spreadsheet.worksheet(title)
+    except WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+        print(f"  ✅  Created missing worksheet: {title}")
+        return ws
+
+
+def header_matches(existing_header, expected_header):
+    return existing_header[: len(expected_header)] == expected_header
+
+
+def ensure_header_row(worksheet, expected_header, accepted_headers=None):
+    """
+    Ensure row 1 contains the expected header.
+
+    If the sheet is empty, inserts the header at row 1.
+    If row 1 exists but doesn't match, raise RuntimeError rather than silently
+    writing data into a mismatched schema.
+    """
+    existing = worksheet.row_values(1)
+    if not existing or not any(v.strip() for v in existing if isinstance(v, str)):
+        worksheet.insert_row(expected_header, index=1)
+        print(f"  ✅  Header row written: {worksheet.title}")
+        return
+
+    valid_headers = [expected_header] + (accepted_headers or [])
+    if not any(header_matches(existing, header) for header in valid_headers):
+        raise RuntimeError(
+            f"Worksheet '{worksheet.title}' has an unexpected header row.\n"
+            f"Expected: {expected_header}\n"
+            f"Found:    {existing}\n"
+            "Fix the tab schema (or create a new empty tab) before running again."
+        )
+
+
+def ensure_listings_header(worksheet):
+    """
+    Ensure cattle_scout_listings uses the v2.3 user_id-prefixed schema.
+
+    Older v2.2 sheets started at url. When found, insert user_id as column A so
+    existing analytical rows are preserved and future rows align correctly.
+    """
+    existing = worksheet.row_values(1)
+    if not existing or not any(v.strip() for v in existing if isinstance(v, str)):
+        worksheet.insert_row(LISTINGS_HEADER_V23, index=1)
+        print(f"  ✅  Header row written: {worksheet.title}")
+        return
+
+    if header_matches(existing, LISTINGS_HEADER_V23):
+        return
+
+    if header_matches(existing, LISTINGS_HEADER_NO_USER_ID):
+        worksheet.insert_cols([["user_id"]], col=1)
+        print("  ✅  Migrated cattle_scout_listings header to v2.3 user_id layout.")
+        return
+
+    ensure_header_row(worksheet, LISTINGS_HEADER_V23)
 
 # ─────────────────────────────────────────────
 # CLASS DETECTION CONSTANTS
@@ -1840,34 +1946,29 @@ def main():
     gc          = gspread.authorize(creds)
     spreadsheet = gc.open(SPREADSHEET_NAME)
 
-    worksheet_log      = spreadsheet.worksheet(LOG_TAB)
-    worksheet_listings = spreadsheet.worksheet(LISTINGS_TAB)
-    worksheet_config   = spreadsheet.worksheet(CONFIG_TAB)
-    worksheet_model    = spreadsheet.worksheet(MODEL_TAB)
+    worksheet_log = get_or_create_worksheet(
+        spreadsheet, LOG_TAB, rows=5000, cols=len(LOG_HEADER_V23)
+    )
+    ensure_header_row(worksheet_log, LOG_HEADER_V23, accepted_headers=[LOG_HEADER_DISPLAY_V23])
 
-    # Write header row to cattle_scout_listings on first run.
-    # Checks cell A1 — if it already contains "user_id" the header exists, skip.
-    # v2.3: user_id is now column A; all other columns shift right by one.
-    if worksheet_listings.acell("A1").value != "user_id":
-        worksheet_listings.append_row(
-            [
-                "user_id",
-                "url", "logged_at", "status", "sale_name", "sale_date",
-                "lot_number", "listing_category", "class", "title", "num_head",
-                "state", "location", "vendor", "breed", "breed_groups",
-                "avg_weight_kg", "weight_at_assessment_kg", "weight_min",
-                "weight_max", "weight_range_kg", "delivery_adjustment_pct",
-                "liveweight_gain_per_day", "dressing_pct", "fat_score",
-                "age_min_months", "age_max_months", "hours_off_feed",
-                "assessment_date", "horn_status", "temperament",
-                "store_condition", "is_EU", "is_NE", "is_LPA", "is_MSA",
-                "has_WHP", "HGP_free", "lifetime_traceable_pct",
-                "price_per_head", "price_c_kg", "sale_type_pricing",
-                "valuation_flag", "fair_value_at_alert", "catalogue_pending",
-            ],
-            table_range="A1"
-        )
-        print("cattle_scout_listings header row written.")
+    worksheet_listings = get_or_create_worksheet(
+        spreadsheet, LISTINGS_TAB, rows=5000, cols=len(LISTINGS_HEADER_V23)
+    )
+    ensure_listings_header(worksheet_listings)
+
+    try:
+        worksheet_config = spreadsheet.worksheet(CONFIG_TAB)
+    except WorksheetNotFound as e:
+        raise RuntimeError(
+            f"Missing required worksheet '{CONFIG_TAB}' in spreadsheet '{SPREADSHEET_NAME}'."
+        ) from e
+
+    try:
+        worksheet_model = spreadsheet.worksheet(MODEL_TAB)
+    except WorksheetNotFound as e:
+        raise RuntimeError(
+            f"Missing required worksheet '{MODEL_TAB}' in spreadsheet '{SPREADSHEET_NAME}'."
+        ) from e
 
     # Load all active user configs from the Sheet.
     # Returns a list of dicts — one per active user with a valid twilio_to.

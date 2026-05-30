@@ -60,7 +60,7 @@ load_dotenv()
 
 # The Google Form response spreadsheet (separate from the main config sheet)
 RESPONSE_SPREADSHEET_NAME = "Signal Scout Responses"
-RESPONSE_SHEET_NAME       = "Form Responses 1"
+RESPONSE_SHEET_NAME       = "Form responses 1"
 
 # The main Drumquil Scout spreadsheet containing cattle_scout_config
 CONFIG_SPREADSHEET_NAME   = "drumquil_scout"
@@ -122,6 +122,17 @@ def connect_sheets():
     response_ss = client.open(RESPONSE_SPREADSHEET_NAME)
     config_ss   = client.open(CONFIG_SPREADSHEET_NAME)
     return response_ss, config_ss
+
+def get_worksheet_case_insensitive(spreadsheet, title):
+    """Return worksheet by exact title, falling back to case-insensitive match."""
+    try:
+        return spreadsheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        wanted = title.casefold()
+        for worksheet in spreadsheet.worksheets():
+            if worksheet.title.casefold() == wanted:
+                return worksheet
+        raise
 
 def slugify(name):
     """
@@ -348,7 +359,7 @@ def main():
 
     # Get form response worksheet
     try:
-        response_ws = response_ss.worksheet(RESPONSE_SHEET_NAME)
+        response_ws = get_worksheet_case_insensitive(response_ss, RESPONSE_SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         print(f"ERROR: Could not find tab '{RESPONSE_SHEET_NAME}' in '{RESPONSE_SPREADSHEET_NAME}'")
         print("Check the tab name in your Google Sheet exactly matches RESPONSE_SHEET_NAME in this script.")
