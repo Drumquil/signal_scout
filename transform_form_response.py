@@ -20,11 +20,11 @@ REQUIREMENTS:
     pip install gspread oauth2client python-dotenv
     .env file with GOOGLE_SHEETS_CREDS_FILE set
 
-COLUMN HEADERS (response Sheet — must match exactly):
+COLUMN HEADERS (response Sheet — current v2.1):
     Timestamp | Email address | Your name | Your WhatsApp number |
     Your property name (optional) | Which regions are you buying from? |
     Your nearest town or delivery point | Sex preference | Stage of production |
-    Breeding females | Bulls | Minimum number of head in a lot |
+    Female breeding stock | Bulls | Minimum number of head in a lot |
     Maximum number of head in a lot | Which breeds will you consider? |
     Do you also want alerts for cross-bred cattle... |
     Minimum average liveweight (kg) | Maximum average liveweight (kg) |
@@ -38,7 +38,7 @@ COLUMN HEADERS (response Sheet — must match exactly):
     Is there anything specific you're looking for that wasn't covered above?
 
 NOTE ON FORM VERSION:
-    This script is written for form v2.0 (build_signal_scout_form_v2.gs).
+    This script is written for form v2.0/v2.1 headers.
     If you need to process a response from the old v1.0 form (which had
     "Commercial store / feeder cattle" instead of Sex / Stage questions),
     see the OLD FORM NOTE comments below.
@@ -48,6 +48,7 @@ import os
 import re
 import sys
 import argparse
+from collections import Counter
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -58,15 +59,53 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────
 
-# The Google Form response spreadsheet (separate from the main config sheet)
-RESPONSE_SPREADSHEET_NAME = "Signal Scout Responses"
-RESPONSE_SHEET_NAME       = "Form responses 1"
-
-# The main Drumquil Scout spreadsheet containing cattle_scout_config
+# The main Drumquil Scout spreadsheet now hosts both the config tab and
+# the linked Google Form responses tab.
 CONFIG_SPREADSHEET_NAME   = "drumquil_scout"
 CONFIG_TAB_NAME           = "cattle_scout_config"
+RESPONSE_SPREADSHEET_NAME = CONFIG_SPREADSHEET_NAME
+RESPONSE_SHEET_NAME       = "Form responses 1"
 
 CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
+
+RESPONSE_HEADER_ALIASES = {
+    "Timestamp": ["Timestamp"],
+    "Email address": ["Email address"],
+    "Your name": ["Your name"],
+    "Your WhatsApp number": ["Your WhatsApp number"],
+    "Your property name (optional)": ["Your property name (optional)"],
+    "Which regions are you buying from?": ["Which regions are you buying from?"],
+    "Your nearest town or delivery point": ["Your nearest town or delivery point"],
+    "Sex preference": ["Sex preference"],
+    "Stage of production": ["Stage of production"],
+    "Female breeding stock": ["Female breeding stock", "Breeding females"],
+    "Bulls": ["Bulls"],
+    "Minimum number of head in a lot": ["Minimum number of head in a lot"],
+    "Maximum number of head in a lot": ["Maximum number of head in a lot"],
+    "Which breeds will you consider?": ["Which breeds will you consider?"],
+    "Do you also want alerts for cross-bred cattle where your selected breed is the primary breed?": [
+        "Do you also want alerts for cross-bred cattle where your selected breed is the primary breed?",
+        "Do you also want alerts for cross-bred cattle..."
+    ],
+    "Minimum average liveweight (kg)": ["Minimum average liveweight (kg)"],
+    "Maximum average liveweight (kg)": ["Maximum average liveweight (kg)"],
+    "Maximum weight spread within the mob (kg)": ["Maximum weight spread within the mob (kg)"],
+    "Do you want to filter by age?": ["Do you want to filter by age?"],
+    "Minimum age (months)": ["Minimum age (months)"],
+    "Maximum age (months)": ["Maximum age (months)"],
+    "Minimum fat score": ["Minimum fat score"],
+    "Maximum fat score": ["Maximum fat score"],
+    "Require EU accreditation?": ["Require EU accreditation?"],
+    "Require Greenham Never Ever (NE) accreditation?": ["Require Greenham Never Ever (NE) accreditation?"],
+    "Exclude listings with a chemical withholding period (WHP)?": ["Exclude listings with a chemical withholding period (WHP)?"],
+    "Require HGP-free declaration?": ["Require HGP-free declaration?"],
+    "Require polled (no horns)?": ["Require polled (no horns)?"],
+    "Require quiet / docile temperament rating?": ["Require quiet / docile temperament rating?"],
+    "Is there anything specific you're looking for that wasn't covered above?": [
+        "Is there anything specific you're looking for that wasn't covered above?"
+    ],
+}
+REQUIRED_RESPONSE_HEADERS = tuple(RESPONSE_HEADER_ALIASES.keys())
 
 # Region → state code mapping
 # Named regions from form → ISO state codes used in target_states config field
@@ -85,6 +124,7 @@ REGION_TO_STATES = {
     "Tasmania":                 ["TAS"],
     "Any / no preference":      [],     # empty = no state filter
 }
+REGION_OPTIONS = tuple(REGION_TO_STATES.keys())
 
 # Stage of production → target_classes mapping
 # These match the class strings used by detect_class() in cattle_scout.py
@@ -94,6 +134,7 @@ STAGE_TO_CLASSES = {
     "Backgrounders, Stores & Feeders":   ["backgrounder", "store", "feeder"],
     "Any stage — no preference":         [],  # empty = no class filter
 }
+STAGE_OPTIONS = tuple(STAGE_TO_CLASSES.keys())
 
 # Sex → target_sex mapping
 SEX_TO_CONFIG = {
@@ -101,6 +142,51 @@ SEX_TO_CONFIG = {
     "Heifers":                                    "heifer",
     "Either — steers, heifers, or mixed is fine": "",  # empty = no sex filter
 }
+BULL_OPTIONS = (
+    "Registered / stud bulls",
+    "Commercial bulls",
+)
+BREEDING_FEMALE_OPTIONS = (
+    "Joined / PTIC / NSM Heifers",
+    "Joined / PTIC / NSM Cows",
+    "Cows with Calves at Foot (CAF)",
+)
+BREED_OPTIONS = (
+    "Angus",
+    "Red Angus",
+    "Poll Hereford",
+    "Hereford",
+    "Murray Grey",
+    "Shorthorn",
+    "Simmental",
+    "Charolais",
+    "Limousin",
+    "South Devon",
+    "Devon",
+    "Speckle Park",
+    "Wagyu",
+    "Blonde d'Aquitaine",
+    "Gelbvieh",
+    "Salers",
+    "Maine-Anjou",
+    "Marchigiana",
+    "Romagnola",
+    "Piedmontese",
+    "Brahman",
+    "Droughtmaster",
+    "Santa Gertrudis",
+    "Belmont Red",
+    "Charbray",
+    "Braford",
+    "Brangus",
+    "Ultrablack",
+    "Beefmaster",
+    "Brahmousin",
+    "Simbrah",
+    "Chiangus",
+    "Akaushi",
+    "Any / no preference",
+)
 
 
 # ─────────────────────────────────────────────
@@ -197,6 +283,23 @@ def parse_list_field(raw):
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
 
+def parse_checkbox_field(raw, allowed_options):
+    """
+    Parse a Google Forms checkbox response using known option strings.
+
+    This avoids mis-parsing options that themselves contain commas, such as
+    "Backgrounders, Stores & Feeders".
+    """
+    if not raw or not raw.strip():
+        return []
+
+    pattern = "|".join(re.escape(option) for option in sorted(allowed_options, key=len, reverse=True))
+    matches = re.findall(pattern, raw)
+    if matches:
+        return matches
+
+    return parse_list_field(raw)
+
 def parse_numeric(raw):
     """Strip non-numeric characters and return a number string, or '' if blank."""
     if not raw or not raw.strip():
@@ -204,11 +307,84 @@ def parse_numeric(raw):
     cleaned = re.sub(r"[^0-9.]", "", raw.strip())
     return cleaned if cleaned else ""
 
+def normalise_header_name(raw):
+    """Normalise response headers to make light wording/spacing changes safe."""
+    return " ".join((raw or "").strip().split())
+
+def validate_response_headers(headers):
+    """
+    Validate the live response header row and build a canonical-header map.
+
+    Supports the v2.1 live contract and the single known legacy alias
+    "Breeding females" -> "Female breeding stock".
+    """
+    alias_to_canonical = {}
+    for canonical, aliases in RESPONSE_HEADER_ALIASES.items():
+        for alias in aliases:
+            alias_to_canonical[normalise_header_name(alias)] = canonical
+
+    canonical_hits = []
+    seen_source_headers = set()
+    for header in headers:
+        normalised = normalise_header_name(header)
+        if normalised in seen_source_headers:
+            raise ValueError(f"Duplicate response header detected: {header!r}")
+        seen_source_headers.add(normalised)
+        canonical = alias_to_canonical.get(normalised)
+        if canonical:
+            canonical_hits.append(canonical)
+
+    duplicate_canonical = [name for name, count in Counter(canonical_hits).items() if count > 1]
+    if duplicate_canonical:
+        dupes = ", ".join(sorted(duplicate_canonical))
+        raise ValueError(
+            f"Response sheet has multiple headers mapping to the same field: {dupes}. "
+            "Keep one header per field before transforming."
+        )
+
+    missing = [header for header in REQUIRED_RESPONSE_HEADERS if header not in canonical_hits]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise ValueError(
+            "Response sheet is missing required v2.1 headers: "
+            f"{missing_list}. Check the live form version and linked response tab."
+        )
+
+    return alias_to_canonical
+
+def build_response_row_dict(headers, data_row):
+    """Return one response row keyed by canonical header names."""
+    alias_to_canonical = validate_response_headers(headers)
+    row_dict = {}
+    for idx, header in enumerate(headers):
+        canonical = alias_to_canonical.get(normalise_header_name(header))
+        if not canonical:
+            continue
+        row_dict[canonical] = data_row[idx] if idx < len(data_row) else ""
+    return row_dict
+
+def map_breeding_female_classes(raw_breeding):
+    """
+    Convert selected breeding-female form options into coarse matcher classes.
+
+    Current runtime only needs to distinguish cow lines from heifer lines.
+    Cow-and-calf units are handled separately via include_cow_calf_units.
+    """
+    classes = []
+    for option in raw_breeding:
+        option_lower = option.lower()
+        if "heifer" in option_lower or "future breeder" in option_lower:
+            classes.append("heifer")
+        if "cow" in option_lower and "calf" not in option_lower and "caf" not in option_lower:
+            classes.append("cow")
+
+    seen = set()
+    return [cls for cls in classes if not (cls in seen or seen.add(cls))]
+
 def user_id_exists(config_ws, user_id):
     """Check if a user_id block already exists in the config tab."""
     col_a = config_ws.col_values(1)  # all values in column A
     return user_id in col_a
-
 
 # ─────────────────────────────────────────────
 # CORE TRANSFORM
@@ -239,7 +415,10 @@ def transform_response(row_dict):
     r("twilio_to", normalise_whatsapp(whatsapp))
 
     # ── Region → target_states ──
-    raw_regions = parse_list_field(row_dict.get("Which regions are you buying from?", ""))
+    raw_regions = parse_checkbox_field(
+        row_dict.get("Which regions are you buying from?", ""),
+        REGION_OPTIONS,
+    )
     states = []
     any_region = False
     for region in raw_regions:
@@ -258,7 +437,10 @@ def transform_response(row_dict):
     r("target_sex", target_sex)
 
     # ── Stage → target_classes ──
-    raw_stages = parse_list_field(row_dict.get("Stage of production", ""))
+    raw_stages = parse_checkbox_field(
+        row_dict.get("Stage of production", ""),
+        STAGE_OPTIONS,
+    )
     classes = []
     any_stage = False
     for stage in raw_stages:
@@ -266,14 +448,23 @@ def transform_response(row_dict):
             any_stage = True
             break
         classes.extend(STAGE_TO_CLASSES.get(stage, []))
-    r("target_classes", ", ".join(classes) if not any_stage else "")
+    target_classes_value = ", ".join(classes) if not any_stage else ""
+    r("target_classes", target_classes_value)
+
+    include_commercial = bool(raw_sex or raw_stages)
+    r("include_commercial", "TRUE" if include_commercial else "FALSE")
 
     # ── Breeding females and bulls ──
-    raw_breeding = parse_list_field(row_dict.get("Breeding females", ""))
-    include_breeding = len(raw_breeding) > 0
+    raw_breeding = parse_checkbox_field(
+        row_dict.get("Female breeding stock", ""),
+        BREEDING_FEMALE_OPTIONS,
+    )
+    breeding_female_classes = map_breeding_female_classes(raw_breeding)
+    include_breeding = len(breeding_female_classes) > 0
     r("include_breeding_females", "TRUE" if include_breeding else "FALSE")
+    r("breeding_female_classes", ", ".join(breeding_female_classes))
 
-    raw_bulls = parse_list_field(row_dict.get("Bulls", ""))
+    raw_bulls = parse_checkbox_field(row_dict.get("Bulls", ""), BULL_OPTIONS)
     include_bulls = len(raw_bulls) > 0
     r("include_bulls", "TRUE" if include_bulls else "FALSE")
 
@@ -286,7 +477,10 @@ def transform_response(row_dict):
     r("max_head", parse_numeric(row_dict.get("Maximum number of head in a lot", "")))
 
     # ── Breed ──
-    raw_breeds = parse_list_field(row_dict.get("Which breeds will you consider?", ""))
+    raw_breeds = parse_checkbox_field(
+        row_dict.get("Which breeds will you consider?", ""),
+        BREED_OPTIONS,
+    )
     any_breed = "Any / no preference" in raw_breeds
     if any_breed:
         r("target_breeds", "")
@@ -343,6 +537,37 @@ def transform_response(row_dict):
 
     return rows
 
+def validate_transformed_config_rows(config_rows):
+    """
+    Sanity-check the transformed row-block against the live runtime contract.
+
+    This keeps common onboarding mistakes from silently reaching the config tab.
+    """
+    settings = {setting: value for _, setting, value in config_rows}
+
+    required_settings = {
+        "active", "twilio_to", "target_states", "target_sex", "target_classes",
+        "include_commercial", "include_breeding_females", "breeding_female_classes",
+        "include_bulls", "include_cow_calf_units",
+    }
+    missing = sorted(required_settings - settings.keys())
+    if missing:
+        raise ValueError(f"Transform output is missing required config settings: {', '.join(missing)}")
+
+    if settings["include_commercial"] == "FALSE":
+        if settings["target_sex"] or settings["target_classes"]:
+            raise ValueError("Commercial filters were written even though include_commercial is FALSE.")
+
+    if settings["include_breeding_females"] == "FALSE" and settings["breeding_female_classes"]:
+        raise ValueError("breeding_female_classes should be blank when include_breeding_females is FALSE.")
+
+    if settings["include_breeding_females"] == "TRUE" and not settings["breeding_female_classes"]:
+        raise ValueError("include_breeding_females is TRUE but no breeding_female_classes were written.")
+
+    if settings["include_cow_calf_units"] == "TRUE" and "cow" in settings["breeding_female_classes"].lower():
+        # Valid, but worth keeping explicit that CAF is a separate toggle from cow lines.
+        pass
+
 
 # ─────────────────────────────────────────────
 # MAIN
@@ -352,6 +577,8 @@ def main():
     parser = argparse.ArgumentParser(description="Transform a Signal Scout form response into a config row-block.")
     parser.add_argument("--row", type=int, default=None,
                         help="Row number to process (2 = first response). Default: most recent row.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate and preview the transform without writing to cattle_scout_config.")
     args = parser.parse_args()
 
     print("Connecting to Google Sheets...")
@@ -383,7 +610,11 @@ def main():
         row_index = len(all_rows) - 1  # most recent
 
     data_row = all_rows[row_index]
-    row_dict = dict(zip(headers, data_row))
+    try:
+        row_dict = build_response_row_dict(headers, data_row)
+    except ValueError as e:
+        print(f"\nERROR: {e}")
+        sys.exit(1)
 
     print(f"\nProcessing response from row {row_index + 1}:")
     print(f"  Name:      {row_dict.get('Your name', '(blank)')}")
@@ -393,6 +624,7 @@ def main():
     # Transform
     try:
         config_rows = transform_response(row_dict)
+        validate_transformed_config_rows(config_rows)
     except ValueError as e:
         print(f"\nERROR: {e}")
         sys.exit(1)
@@ -414,6 +646,10 @@ def main():
     for row in config_rows:
         val_preview = str(row[2])[:60] + "..." if len(str(row[2])) > 60 else str(row[2])
         print(f"  {row[0]:<20} {row[1]:<30} {val_preview}")
+
+    if args.dry_run:
+        print("\nDry run only — nothing written.")
+        sys.exit(0)
 
     confirm = input("\nLooks correct? Append to config Sheet? [y/N] ")
     if confirm.strip().lower() != "y":
