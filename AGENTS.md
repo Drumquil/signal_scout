@@ -2,27 +2,45 @@
 
 ## Project Identity
 
-This repository contains Signal Scout, a Drumquil Signal product for monitoring Australian cattle sale listings, filtering lots against buyer criteria, and sending WhatsApp alerts for matching opportunities.
+Signal Scout monitors Australian cattle sale listings, filters lots against buyer
+criteria, and sends WhatsApp alerts for matching opportunities.
 
-The current implementation focuses on online cattle listing platforms. AuctionsPlus is the first active source, but the product direction is broader: Signal Scout should eventually support cattle sale data from multiple online platforms and, where feasible, structured or semi-structured data from physical saleyard locations such as Grafton, Lismore, Casino, and other Australian saleyards.
+Current priority: beta stabilisation of the AuctionsPlus-first runtime. Focus on
+scraping reliability, filtering, Google Sheets contracts, onboarding, and alert
+delivery before expanding scope.
 
-The current priority is Signal Scout beta stabilisation. Work should focus on making the existing scraper, filtering logic, Google Sheets data layer, onboarding workflow, and alert pipeline reliable before expanding scope.
+Deferred unless the user asks: Signal Model, web interface work, platform
+expansion, product renaming, and paid-launch infrastructure.
 
-Signal Model, web interface work, platform expansion, product renaming, and paid-launch infrastructure are important but deferred unless the user explicitly asks to work on them.
+## Default Read Order
 
-## Read Order
+Read the smallest relevant set of files first.
 
-Read the smallest set of files needed for the task, starting from the ordered list below.
+For most non-trivial tasks, start with:
 
-Always read `README.md`, `HANDOVER.md`, and `docs/status.md` before non-trivial changes.
+1. `docs/CODEX_BRIEF.md`
+2. `docs/PROJECT_MAP.md`
+3. `docs/CURRENT_STATE.md`
 
-Also read:
+Then read only the task-specific reference:
 
-- `docs/schema.md` before changing Google Sheets, logging, config, onboarding, or data contracts.
-- `docs/auctionsplus-selector-reference.md` before changing scraping, parsing, selectors, listing classification, or AuctionsPlus-specific behaviour.
-- `docs/prelaunch-checklist.md` before changing beta behaviour, alerts, compliance, launch, user onboarding, or production settings.
-- `docs/strategy.md` before changing product scope, platform expansion, pricing, positioning, or roadmap.
+- `docs/schema.md` for Google Sheets, logging, config, onboarding, or data contracts.
+- `docs/auctionsplus-selector-reference.md` for scraping, parsing, selectors, or AuctionsPlus-specific behaviour.
+- `docs/prelaunch-checklist.md` for beta behaviour, alerts, compliance, launch, onboarding, or production settings.
+- `docs/strategy.md` for product scope, platform expansion, positioning, or roadmap.
 
-Use `references/` only for background research or source material. Reference files are not authoritative unless an active doc points to them or the user explicitly asks to use them.
+Read `README.md` or `HANDOVER.md` only when onboarding, reconciling workspace
+setup, or investigating environment-specific issues.
 
-Treat older root-level project state, checkpoint, `.docx`, `files/`, and `files.zip` material as historical unless it has been migrated into `docs/` or `references/`.
+Read `docs/status.md` only when detailed history, validation chronology, or
+older decision context is required. It is not the default starting point.
+
+## Working Rules
+
+- Prefer small, scoped changes over broad refactors.
+- Update existing active docs before creating parallel docs.
+- Put frequently changing facts in `docs/CURRENT_STATE.md`, not here.
+- Treat `references/` as background material, not active source of truth, unless
+  an active doc points to it.
+- Treat older root-level checkpoint files, `.docx`, `files/`, and `files.zip`
+  material as historical unless migrated into `docs/` or `references/`.

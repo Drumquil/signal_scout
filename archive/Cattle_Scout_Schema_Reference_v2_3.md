@@ -6,9 +6,9 @@ Version 2.3 | 26 May 2026
 
 ## Google Sheets Overview
 
-**Sheet name:** `drumquil_scout`
-**Google Cloud project:** `drumquil-scout`
-**Service account:** `cattle-scout@drumquil-scout.iam.gserviceaccount.com`
+**Sheet name:** `drumquil_scout`  
+**Google Cloud project:** `drumquil-scout`  
+**Service account:** `cattle-scout@drumquil-scout.iam.gserviceaccount.com`  
 **Credentials file:** `google_credentials.json` (path referenced by `GOOGLE_SHEETS_CREDS_FILE` in `.env`)
 
 | Tab | Purpose |
@@ -18,27 +18,13 @@ Version 2.3 | 26 May 2026
 | `cattle_scout_config` | Multi-user buying criteria: `user_id | setting | value` |
 | `cattle_model_output` | Latest fair value signal (integration point) |
 
-Optional beta-ops tabs recommended before a 3-5 tester cohort:
-
-| Tab | Purpose |
-|---|---|
-| `beta_operator_tracker` | Manual operator control surface for tester invitation, activation, follow-up, and blockers. |
-| `twilio_message_dispatch` | Append-only log of outbound WhatsApp messages created by Signal Scout. |
-| `twilio_message_status` | Append-only log of Twilio delivery status callbacks keyed by `message_sid`. |
-
 ---
 
 ## Tab 1: `cattle_scout_log` (v2.3)
 
-Written by the runtime after a successful alert send, or after a successful
-test-mode dry send. One row per alert event. Kept deliberately lean — this tab
-is read in full at every run startup for deduplication.
+Written by `log_listing()`. One row per alert event (`WATCHING` or `ALERTED`). Kept deliberately lean — this tab is read in full at every run startup for deduplication.
 
 **Multi-user dedup key:** `(url, user_id)` so one listing can alert multiple users independently.
-
-**Status lifecycle:** production rows use `WATCHING` and `ALERTED`; test-mode
-runs use `TEST_WATCHING` and `TEST_ALERTED`. Production dedup ignores
-`TEST_ALERTED`, so validation runs do not suppress the first live send.
 
 **append_row call:** always uses `table_range="A1"` to anchor rows to column A. Without this, gspread can drift new rows rightward.
 
@@ -46,7 +32,7 @@ runs use `TEST_WATCHING` and `TEST_ALERTED`. Production dedup ignores
 |---|---|---|
 | A | `user_id` | User identifier (from config tab) |
 | B | `url` | Listing URL |
-| C | `status` | `WATCHING`, `ALERTED`, `TEST_WATCHING`, or `TEST_ALERTED` |
+| C | `status` | `WATCHING` or `ALERTED` |
 | D | `title` | Listing title |
 | E | `category` | `commercial`, `breeding_female`, `cow_calf_unit`, `bull` |
 | F | `class` | Detected class (`weaned`, `yearling`, `steer`, `heifer`, etc.) |
@@ -68,9 +54,7 @@ runs use `TEST_WATCHING` and `TEST_ALERTED`. Production dedup ignores
 
 ## Tab 2: `cattle_scout_listings` (v2.3)
 
-Written by the runtime after a successful alert send, or after a successful
-test-mode dry send. One row per alerted listing — append-only, never updated in
-place.
+Written by `log_listing_full()`. One row per alerted listing — append-only, never updated in place.
 
 This is the analytical dataset used for:
 - Model training data (post-auction price backfill against pre-auction traits)
@@ -84,7 +68,7 @@ This is the analytical dataset used for:
 | A | `user_id` | str | User identifier (from config tab) |
 | B | `url` | str | Primary key for this tab |
 | C | `logged_at` | str | `YYYY-MM-DD HH:MM` |
-| D | `status` | str | `ALERTED`, `WATCHING`, `TEST_ALERTED`, or `TEST_WATCHING` |
+| D | `status` | str | `ALERTED` or `WATCHING` |
 | E | `sale_name` | str | Breadcrumb sale name |
 | F | `sale_date` | str | Auction info panel |
 | G | `lot_number` | int | `Lot NNN` |
@@ -142,22 +126,7 @@ Read by `load_config()`.
 Notes:
 - Users with `active = FALSE` are excluded.
 - `twilio_to` is mandatory per user (recipient WhatsApp number).
-- Field parsing rules match v2.1: lists are comma-separated, booleans are `TRUE`/`FALSE`, numerics parse to float. Comma-formatted numbers such as `1,200` are accepted; invalid numeric values such as `300kg` skip that user's config for the run rather than disabling the filter silently.
-- Current onboarding transform writes these stock-type contract fields explicitly:
-  `target_sex`, `target_classes`, `include_commercial`,
-  `include_breeding_females`, `breeding_female_classes`,
-  `include_bulls`, and `include_cow_calf_units`.
-- Female breeding semantics for v2.1:
-  `breeding_female_classes = heifer` for joined/PTIC/NSM heifer lines,
-  `breeding_female_classes = cow` for joined/PTIC/NSM cow lines,
-  and CAF is controlled only by `include_cow_calf_units = TRUE`.
-- Blank commercial sex/stage answers are intentional for breeding-only profiles
-  and should write `include_commercial = FALSE`.
-- Lightweight pre-live contract check:
-  run `python -m unittest test_transform_form_response_contract.py`
-  before processing the first real tester response, then use
-  `python transform_form_response.py --row <n> --dry-run`
-  to preview the specific submission before writing it.
+- Field parsing rules match v2.1: lists are comma-separated, booleans are `TRUE`/`FALSE`, numerics parse to float.
 
 ---
 
@@ -168,3 +137,4 @@ Written by `cattle_model.py`. Read by `get_model_fair_value()`. Column B contain
 ---
 
 *© 2026 Drumquil Signal. All rights reserved. | Cattle Scout Schema Reference v2.3 | 26 May 2026*
+
