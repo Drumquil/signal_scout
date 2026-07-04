@@ -121,6 +121,32 @@ class SourceParserSpikeTests(unittest.TestCase):
         self.assertNotIn("55555", record_ids)
         self.assertNotIn("12345", record_ids)
 
+    def test_parse_stockplace_html_skips_duplicate_listing_cards(self):
+        html = """
+        <html>
+          <body>
+            <article class="listing-card">
+              <h3><a href="/stock/livestock-for-sale/listing/120-angus-steers-77777">120 Angus steers</a></h3>
+              <div class="location">Roma, QLD</div>
+              <p>No. of Head: 120</p>
+              <p>Stock Type: Steers</p>
+            </article>
+            <article class="listing-card">
+              <h3><a href="/stock/livestock-for-sale/listing/120-angus-steers-77777">120 Angus steers</a></h3>
+              <div class="location">Roma, QLD</div>
+              <p>No. of Head: 120</p>
+              <p>Stock Type: Steers</p>
+            </article>
+          </body>
+        </html>
+        """
+
+        records, summary = parse_stockplace_html(html, "https://www.stockplace.com.au/stock", scraped_at="2026-06-27T00:00:00+00:00")
+
+        self.assertEqual(summary["record_count"], 1)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(records[0]["source_record_id"], "77777")
+
     def test_parse_stockplace_detail_html_extracts_clean_detail_fields(self):
         record = parse_stockplace_detail_html(
             STOCKPLACE_DETAIL_HTML,

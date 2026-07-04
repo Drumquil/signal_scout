@@ -87,6 +87,53 @@ class AlertSafetyTests(unittest.TestCase):
         self.assertEqual(len(users), 1)
         self.assertEqual(users[0]["max_price_per_head"], 1200.0)
 
+    def test_twilio_delivery_mode_is_required_for_live_sends(self):
+        original_test_mode = cattle_scout.TEST_MODE
+        original_mode = cattle_scout.TWILIO_WHATSAPP_MODE
+        try:
+            cattle_scout.TEST_MODE = True
+            cattle_scout.TWILIO_WHATSAPP_MODE = ""
+            cattle_scout.validate_twilio_delivery_mode()
+
+            cattle_scout.TEST_MODE = False
+            with self.assertRaisesRegex(RuntimeError, "TWILIO_WHATSAPP_MODE"):
+                cattle_scout.validate_twilio_delivery_mode()
+
+            for mode in ("sandbox", "registered"):
+                cattle_scout.TWILIO_WHATSAPP_MODE = mode
+                cattle_scout.validate_twilio_delivery_mode()
+        finally:
+            cattle_scout.TEST_MODE = original_test_mode
+            cattle_scout.TWILIO_WHATSAPP_MODE = original_mode
+
+    def test_log_listing_row_keeps_unknown_head_blank(self):
+        listing = {
+            "url": "https://example.test/listing/2",
+            "title": "Unknown head listing",
+            "listing_category": "commercial",
+            "class": "feeder",
+            "breed": "Angus",
+            "num_head": None,
+            "num_calves": None,
+            "avg_weight_kg": None,
+            "weight_range_kg": None,
+            "fat_score": None,
+            "age_min_months": None,
+            "age_max_months": None,
+            "is_EU": False,
+            "is_NE": False,
+            "has_WHP": False,
+            "price_c_kg": None,
+            "location": "Roma, QLD",
+            "vendor": "Example Agent",
+            "sale_date": "Monday, 6 July 2026",
+        }
+
+        row = cattle_scout.build_log_listing_row(listing, "TEST_WATCHING", "beta_tester")
+
+        self.assertEqual(row[7], "")
+        self.assertTrue(row[18].endswith(" UTC"))
+
 
 if __name__ == "__main__":
     unittest.main()

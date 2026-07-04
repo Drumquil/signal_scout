@@ -487,6 +487,7 @@ def parse_stockplace_html(
     soup = BeautifulSoup(html, "html.parser")
     scraped_at = scraped_at or now_iso()
     records = []
+    seen_keys = set()
     skipped = 0
 
     cards = soup.find_all(["article", "div", "li"])
@@ -512,6 +513,15 @@ def parse_stockplace_html(
         if record["state"] is None and not record["location"]:
             skipped += 1
             continue
+        dedup_key = (
+            record.get("source_record_id")
+            or record.get("source_url")
+            or (record.get("listing_title"), record.get("location"))
+        )
+        if dedup_key in seen_keys:
+            skipped += 1
+            continue
+        seen_keys.add(dedup_key)
         records.append(record)
 
     summary = {

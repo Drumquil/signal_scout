@@ -6,16 +6,10 @@ validation, reusing the first active user's WhatsApp destination so the live
 runtime can exercise per-user alert routing without inventing a fake number.
 """
 
-import os
-from dotenv import load_dotenv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-load_dotenv()
+from sheets_client import open_worksheet
 
 SPREADSHEET_NAME = "drumquil_scout"
 CONFIG_TAB = "cattle_scout_config"
-CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
 
 DUMMY_USERS = [
     {
@@ -30,14 +24,7 @@ DUMMY_USERS = [
 
 
 def connect_config_sheet():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
-    spreadsheet = client.open(SPREADSHEET_NAME)
-    return spreadsheet.worksheet(CONFIG_TAB)
+    return open_worksheet(CONFIG_TAB, spreadsheet_name=SPREADSHEET_NAME)
 
 
 def get_all_rows(config_ws):
@@ -92,9 +79,6 @@ def build_dummy_rows(user_id, twilio_to, notes):
 
 
 def main():
-    if not CREDS_FILE:
-        raise RuntimeError("GOOGLE_SHEETS_CREDS_FILE is missing from .env.")
-
     config_ws = connect_config_sheet()
     rows = get_all_rows(config_ws)
     blocks = get_user_blocks(rows)

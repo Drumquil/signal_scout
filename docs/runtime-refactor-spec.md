@@ -1,5 +1,9 @@
 # Signal Scout Runtime Refactor Spec
-**Version 0.1 | Date: 31 May 2026 | Status: Proposed**
+**Version 0.1 | Date: 31 May 2026 | Status: Implemented**
+
+Implementation note, accurate as of 5 July 2026: the shared source boundary is
+now in `cattle_scout.py`. AuctionsPlus remains the default live source, with
+Stockplace, RMA, and authorised notice intake behind explicit feature gates.
 
 ---
 
@@ -81,11 +85,11 @@ This refactor should not:
 
 ---
 
-## 6. Proposed Runtime Shape
+## 6. Implemented Runtime Shape
 
 ### 6.1 High-level flow
 
-Proposed run flow:
+Implemented run flow:
 
 1. load all active users
 2. load dedup log
@@ -113,7 +117,7 @@ That is enough separation for Phase 1.5 / Phase 2 without overbuilding.
 
 ---
 
-## 7. Proposed Internal Data Model
+## 7. Implemented Internal Data Model
 
 ### 7.1 Shared per-run listing object
 
@@ -187,7 +191,7 @@ Do not force these into the Sheets schema during this refactor.
 
 ---
 
-## 8. Proposed Source Abstraction
+## 8. Implemented Source Abstraction
 
 ### 8.1 Smallest useful interface
 
@@ -237,7 +241,7 @@ This keeps the current parser stable while giving it a clearer boundary.
 
 ---
 
-## 9. Proposed Main Loop
+## 9. Implemented Main Loop
 
 ### 9.1 New structure
 

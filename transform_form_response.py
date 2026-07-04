@@ -17,7 +17,7 @@ USAGE:
         → processes row 3 of the response Sheet (row 1 = header, row 2 = first response)
 
 REQUIREMENTS:
-    pip install gspread oauth2client python-dotenv
+    pip install gspread python-dotenv
     .env file with GOOGLE_SHEETS_CREDS_FILE set
 
 COLUMN HEADERS (response Sheet — current v2.1):
@@ -44,14 +44,13 @@ NOTE ON FORM VERSION:
     see the OLD FORM NOTE comments below.
 """
 
-import os
 import re
 import sys
 import argparse
 from collections import Counter
 from dotenv import load_dotenv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from gspread.exceptions import WorksheetNotFound
+from sheets_client import get_client
 
 load_dotenv()
 
@@ -65,8 +64,6 @@ CONFIG_SPREADSHEET_NAME   = "drumquil_scout"
 CONFIG_TAB_NAME           = "cattle_scout_config"
 RESPONSE_SPREADSHEET_NAME = CONFIG_SPREADSHEET_NAME
 RESPONSE_SHEET_NAME       = "Form responses 1"
-
-CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
 
 RESPONSE_HEADER_ALIASES = {
     "Timestamp": ["Timestamp"],
@@ -199,12 +196,7 @@ def connect_sheets():
       - response_ss: the Google Form response spreadsheet
       - config_ss:   the main drumquil_scout config spreadsheet
     """
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
+    client = get_client()
     response_ss = client.open(RESPONSE_SPREADSHEET_NAME)
     config_ss   = client.open(CONFIG_SPREADSHEET_NAME)
     return response_ss, config_ss
@@ -213,7 +205,7 @@ def get_worksheet_case_insensitive(spreadsheet, title):
     """Return worksheet by exact title, falling back to case-insensitive match."""
     try:
         return spreadsheet.worksheet(title)
-    except gspread.exceptions.WorksheetNotFound:
+    except WorksheetNotFound:
         wanted = title.casefold()
         for worksheet in spreadsheet.worksheets():
             if worksheet.title.casefold() == wanted:
@@ -381,10 +373,27 @@ def map_breeding_female_classes(raw_breeding):
     seen = set()
     return [cls for cls in classes if not (cls in seen or seen.add(cls))]
 
+def find_user_row_indices(config_ws, user_id):
+    """Return 1-based Sheet row numbers for every row in a user_id block."""
+    col_a = config_ws.col_values(1)  # all values in column A
+    return [
+        row_number
+        for row_number, value in enumerate(col_a, start=1)
+        if value == user_id
+    ]
+
+
 def user_id_exists(config_ws, user_id):
     """Check if a user_id block already exists in the config tab."""
-    col_a = config_ws.col_values(1)  # all values in column A
-    return user_id in col_a
+    return bool(find_user_row_indices(config_ws, user_id))
+
+
+def delete_user_rows(config_ws, user_id):
+    """Delete every row for user_id, bottom-up so row numbers stay stable."""
+    row_indices = find_user_row_indices(config_ws, user_id)
+    for row_number in reversed(row_indices):
+        config_ws.delete_rows(row_number)
+    return len(row_indices)
 
 # ─────────────────────────────────────────────
 # CORE TRANSFORM
@@ -564,10 +573,6 @@ def validate_transformed_config_rows(config_rows):
     if settings["include_breeding_females"] == "TRUE" and not settings["breeding_female_classes"]:
         raise ValueError("include_breeding_females is TRUE but no breeding_female_classes were written.")
 
-    if settings["include_cow_calf_units"] == "TRUE" and "cow" in settings["breeding_female_classes"].lower():
-        # Valid, but worth keeping explicit that CAF is a separate toggle from cow lines.
-        pass
-
 
 # ─────────────────────────────────────────────
 # MAIN
@@ -634,15 +639,27 @@ def main():
 
     # Check for duplicate in config Sheet
     config_ws = config_ss.worksheet(CONFIG_TAB_NAME)
-    if user_id_exists(config_ws, user_id):
-        print(f"\nWARNING: user_id '{user_id}' already exists in cattle_scout_config.")
-        confirm = input("  Overwrite? This will APPEND a second block — review manually. [y/N] ")
-        if confirm.strip().lower() != "y":
-            print("Aborted.")
-            sys.exit(0)
+    existing_user_rows = find_user_row_indices(config_ws, user_id)
+    replace_existing = False
+    if existing_user_rows:
+        print(
+            f"\nWARNING: user_id '{user_id}' already exists in cattle_scout_config "
+            f"({len(existing_user_rows)} row(s))."
+        )
+        if args.dry_run:
+            print("  Dry run: existing rows would be deleted before the new block is appended.")
+        else:
+            confirm = input("  Replace existing block? This will DELETE old rows before appending the new block. [y/N] ")
+            if confirm.strip().lower() != "y":
+                print("Aborted.")
+                sys.exit(0)
+            replace_existing = True
 
     # Preview
-    print(f"\nAbout to append {len(config_rows)} rows to '{CONFIG_TAB_NAME}':")
+    action = "replace and append" if replace_existing else "append"
+    print(f"\nAbout to {action} {len(config_rows)} rows in '{CONFIG_TAB_NAME}':")
+    if replace_existing:
+        print(f"  Existing rows to delete first: {existing_user_rows}")
     for row in config_rows:
         val_preview = str(row[2])[:60] + "..." if len(str(row[2])) > 60 else str(row[2])
         print(f"  {row[0]:<20} {row[1]:<30} {val_preview}")
@@ -651,10 +668,14 @@ def main():
         print("\nDry run only — nothing written.")
         sys.exit(0)
 
-    confirm = input("\nLooks correct? Append to config Sheet? [y/N] ")
+    confirm = input("\nLooks correct? Write to config Sheet? [y/N] ")
     if confirm.strip().lower() != "y":
         print("Aborted — nothing written.")
         sys.exit(0)
+
+    if replace_existing:
+        deleted = delete_user_rows(config_ws, user_id)
+        print(f"Deleted {deleted} existing row(s) for user '{user_id}'.")
 
     # Append to config Sheet
     config_ws.append_rows(config_rows, value_input_option="RAW")

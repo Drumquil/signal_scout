@@ -62,7 +62,7 @@ runs use `TEST_WATCHING` and `TEST_ALERTED`. Production dedup ignores
 | P | `vendor` | Agent / vendor string |
 | Q | `sale_date` | Sale date string |
 | R | `flag` | Valuation flag string (or blank) |
-| S | `logged_at` | Timestamp `YYYY-MM-DD HH:MM` |
+| S | `logged_at` | Timestamp `YYYY-MM-DD HH:MM UTC` |
 
 ---
 
@@ -83,7 +83,7 @@ This is the analytical dataset used for:
 |---|---|---|---|
 | A | `user_id` | str | User identifier (from config tab) |
 | B | `url` | str | Primary key for this tab |
-| C | `logged_at` | str | `YYYY-MM-DD HH:MM` |
+| C | `logged_at` | str | `YYYY-MM-DD HH:MM UTC` |
 | D | `status` | str | `ALERTED`, `WATCHING`, `TEST_ALERTED`, or `TEST_WATCHING` |
 | E | `sale_name` | str | Breadcrumb sale name |
 | F | `sale_date` | str | Auction info panel |

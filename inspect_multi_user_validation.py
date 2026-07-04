@@ -5,30 +5,17 @@ Inspect Google Sheets log/listings rows for the dummy multi-user validation
 users and report duplicate / overlap characteristics.
 """
 
-import os
 from collections import Counter, defaultdict
-from dotenv import load_dotenv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-load_dotenv()
+from sheets_client import open_spreadsheet
 
 SPREADSHEET_NAME = "drumquil_scout"
-CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
 LOG_TAB = "cattle_scout_log"
 LISTINGS_TAB = "cattle_scout_listings"
 TARGET_USERS = {"dummy_multi_a", "dummy_multi_b", "dummy_batch_a", "dummy_batch_b", "tom_steers"}
 
 
 def connect_sheet():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
-    spreadsheet = client.open(SPREADSHEET_NAME)
-    return spreadsheet
+    return open_spreadsheet(SPREADSHEET_NAME)
 
 
 def summarize_tab(rows, tab_name):
@@ -77,9 +64,6 @@ def summarize_tab(rows, tab_name):
 
 
 def main():
-    if not CREDS_FILE:
-        raise RuntimeError("GOOGLE_SHEETS_CREDS_FILE is missing from .env.")
-
     spreadsheet = connect_sheet()
     log_rows = spreadsheet.worksheet(LOG_TAB).get_all_values()
     listings_rows = spreadsheet.worksheet(LISTINGS_TAB).get_all_values()

@@ -15,7 +15,7 @@ Three-class detection hierarchy (applied in order, first match wins):
   2. Breeding female    — title contains joining/pregnancy status qualifier (PTIC, NSM, AID, etc.)
   3. Commercial store   — weaners, yearlings, feeders, backgrounders, etc.
 
-Multi-user architecture (v2.3):
+Multi-user architecture (v2.4 runtime, v2.3 Sheet schema):
   cattle_scout_config tab uses row-block-per-user layout.
   Column A = user_id, Column B = setting, Column C = value.
   load_config() returns a list of dicts — one per active user.
@@ -29,7 +29,7 @@ Requires:
     See .env.example for the required variables.
 
 Author: Tom Flanagan
-Version: 2.3 — May 2026
+Version: 2.4 — July 2026
 """
 
 import json
@@ -39,14 +39,13 @@ import re
 import sys
 import time
 
-import gspread
 import requests
 from bs4 import BeautifulSoup
-from oauth2client.service_account import ServiceAccountCredentials
 from gspread.exceptions import WorksheetNotFound
 from twilio.rest import Client
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+from sheets_client import get_credentials_file, open_spreadsheet
 
 # Load credentials from the .env file in the same folder.
 # Must run BEFORE any os.getenv() calls below.
@@ -67,10 +66,7 @@ if hasattr(sys.stderr, "reconfigure"):
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM        = os.getenv("TWILIO_FROM")
-TWILIO_TO          = os.getenv("TWILIO_TO")
-
-# Google Sheets — path to service account JSON key
-GOOGLE_SHEETS_CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
+TWILIO_WHATSAPP_MODE = os.getenv("TWILIO_WHATSAPP_MODE", "").strip().lower()
 
 # ─────────────────────────────────────────────
 # BEHAVIOURAL CONFIG — kept in source for visibility
@@ -99,6 +95,8 @@ UNDERVALUED_THRESHOLD = 0.10
 OVERVALUED_THRESHOLD  = 0.10
 BATCH_WRITE_RETRIES   = 4
 BATCH_WRITE_BACKOFFS  = [15, 45, 90, 180]
+MODEL_FAIR_VALUE_MIN_C_KG = 100
+MODEL_FAIR_VALUE_MAX_C_KG = 2000
 ENABLE_AUTHORIZED_NOTICE_SOURCE = os.getenv("ENABLE_AUTHORIZED_NOTICE_SOURCE", "FALSE").upper() == "TRUE"
 AUTHORIZED_NOTICE_SOURCE_DIR = os.getenv("AUTHORIZED_NOTICE_SOURCE_DIR", "authorized_notice_samples")
 ENABLE_STOCKPLACE_SOURCE = os.getenv("ENABLE_STOCKPLACE_SOURCE", "FALSE").upper() == "TRUE"
@@ -1371,10 +1369,12 @@ def scrape_commercial_listing(url, soup, page_text):
         age_min_months = int(age_match.group(1))
         age_max_months = int(age_match.group(2))
     else:
-        single_age = re.search(r"(\d+)\s*[Mm]onths?", page_text)
-        if single_age:
-            age_min_months = int(single_age.group(1))
-            age_max_months = age_min_months
+        for line in lines_after("Age", page_lines, n=5):
+            single_age = re.search(r"\b(\d+)\s*[Mm]onths?\b", line)
+            if single_age:
+                age_min_months = int(single_age.group(1))
+                age_max_months = age_min_months
+                break
 
     # ── HGP status ──
     # Page structure: "HGP Status" → "The owner declares that the cattle have not been treated
@@ -1435,7 +1435,7 @@ def scrape_commercial_listing(url, soup, page_text):
     is_MSA  = False
     has_WHP = False
 
-    # Extract text from the Accreditation(s) block only — stops at next section header
+    # Extract text from Accreditation(s) / Verification(s) blocks only.
     accred_block = []
     in_accred = False
     for line in page_lines:
@@ -1446,13 +1446,15 @@ def scrape_commercial_listing(url, soup, page_text):
             # Stop at next recognised section header
             if any(h in line for h in ["Delivery", "Trading Terms", "NLIS", "Movement", "Special", "Sale Types", "Featured"]):
                 break
+            if len(accred_block) >= 15:
+                break
             accred_block.append(line)
 
     accred_text = " ".join(accred_block).upper()
-    is_EU   = "EU" in accred_text and "EUROPEAN" not in accred_text
-    is_NE   = "NEVER EVER" in accred_text or " NE " in accred_text
-    is_LPA  = "LPA" in accred_text
-    is_MSA  = "MSA" in accred_text
+    is_EU   = bool(re.search(r"\bEU\b", accred_text)) and "EUROPEAN" not in accred_text
+    is_NE   = bool(re.search(r"\bNE\b", accred_text)) or "NEVER EVER" in accred_text
+    is_LPA  = bool(re.search(r"\bLPA\b", accred_text))
+    is_MSA  = bool(re.search(r"\bMSA\b", accred_text))
     has_WHP = bool(re.search(r"\bWHP\b", accred_text))
 
     # ── Price ──
@@ -1962,11 +1964,12 @@ def listing_match(listing, config):
     that rejected it.
 
     Mandatory gates (always applied):
-      listing type, active flag, category toggle, state, class, head count,
-      sale type.
+      listing type, active flag, category toggle, known state, known class,
+      head count, known sale type.
 
     Soft gates (skipped when field is None or "Unknown"):
-      weight, weight range, breed, fat score, age, accreditations.
+      state, class, sale type, weight, weight range, breed, fat score, age,
+      accreditations.
       Never suppress a match because the parser missed a field — silent misses
       are worse than false positives for a buy-side alert tool.
 
@@ -1997,14 +2000,14 @@ def listing_match(listing, config):
 
     # ── State filter ──
     target_states = [s.upper() for s in config.get("target_states", [])]
-    if target_states and listing["state"] not in target_states:
+    if target_states and listing["state"] != "Unknown" and listing["state"] not in target_states:
         return False, f"state={listing['state']} not in {target_states}"
 
     # ── Class filter — commercial only ──
     listing_class = (listing.get("class") or "").lower()
     if category == "commercial":
         active_classes = list(config.get("target_classes", []))
-        if active_classes and not any(tc in listing_class for tc in active_classes):
+        if active_classes and listing_class not in ("", "unknown") and not any(tc in listing_class for tc in active_classes):
             return False, f"class={listing['class']!r} not in target_classes"
 
     # ── Sex filter — soft gate ──
@@ -2030,7 +2033,7 @@ def listing_match(listing, config):
     # ── Sale type filter ──
     sale_types = [st.lower() for st in config.get("sale_types", [])]
     sale_name_lower = (listing.get("sale_name") or "").lower()
-    if sale_types and not any(st in sale_name_lower for st in sale_types):
+    if sale_types and sale_name_lower not in ("", "unknown sale") and not any(st in sale_name_lower for st in sale_types):
         return False, f"sale_name={listing.get('sale_name')!r} not in sale_types"
 
     # ── Select weight/age/fat config set ──
@@ -2163,6 +2166,11 @@ def is_dedup_watching(status):
     return status == "WATCHING" or (TEST_MODE and status == "TEST_WATCHING")
 
 
+def utc_timestamp():
+    """Consistent Sheets timestamp for CI and local runs."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def build_log_listing_row(listing, status, user_id, flag=None):
     """
     Build a lean cattle_scout_log row for batched writing.
@@ -2179,6 +2187,7 @@ def build_log_listing_row(listing, status, user_id, flag=None):
         "WHP" if listing["has_WHP"] else "",
     ]))
     calf_info = f" (+{listing['num_calves']} calves)" if listing.get("num_calves") else ""
+    head = "" if listing.get("num_head") is None else str(listing["num_head"])
     row = [
         user_id,                                                                    # A  user_id
         listing["url"],                                                             # B  url
@@ -2187,7 +2196,7 @@ def build_log_listing_row(listing, status, user_id, flag=None):
         listing["listing_category"],                                                # E  category
         listing["class"],                                                           # F  class
         listing["breed"],                                                           # G  breed
-        str(listing["num_head"]) + calf_info,                                       # H  head
+        head + calf_info,                                                           # H  head
         listing["avg_weight_kg"],                                                   # I  avg_weight
         listing["weight_range_kg"],                                                 # J  weight_range
         listing["fat_score"],                                                       # K  fat_score
@@ -2198,7 +2207,7 @@ def build_log_listing_row(listing, status, user_id, flag=None):
         listing["vendor"],                                                          # P  vendor
         listing["sale_date"],                                                       # Q  sale_date
         flag or "",                                                                 # R  flag
-        datetime.now().strftime("%Y-%m-%d %H:%M"),                                  # S  logged_at
+        utc_timestamp(),                                                            # S  logged_at
     ]
     return row
 
@@ -2248,7 +2257,7 @@ def build_listing_full_row(listing, status, flag, fair_value, user_id):
     row = [
         user_id,                                            # A  user_id
         listing["url"],                                     # B  url
-        datetime.now().strftime("%Y-%m-%d %H:%M"),          # C  logged_at
+        utc_timestamp(),                                    # C  logged_at
         status,                                             # D  status
         n(listing.get("sale_name")),                        # E  sale_name
         n(listing.get("sale_date")),                        # F  sale_date
@@ -2324,15 +2333,51 @@ def append_rows_with_retry(worksheet, rows, label):
 # STEP 9 — VALUATION
 # ─────────────────────────────────────────────
 
+def is_date_like(value):
+    """Return True when a model timestamp cell looks like a date."""
+    text = str(value or "").strip()
+    return bool(
+        re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", text)
+        or re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", text)
+    )
+
+
 def get_model_fair_value(worksheet_model):
-    """Reads the most recent fair value from the cattle_model.py Sheets output."""
+    """Reads the most recent plausible fair value from cattle_model.py output."""
     try:
-        values = worksheet_model.col_values(2)
-        latest = values[-1] if values else None
-        return float(latest) if latest else None
+        rows = worksheet_model.get_all_values()
     except Exception as e:
         print(f"  ⚠️  Could not read model fair value: {e}")
         return None
+
+    for row in reversed(rows[1:]):  # skip header
+        if len(row) < 2:
+            continue
+
+        timestamp = row[0].strip()
+        raw_value = row[1].strip()
+        if not raw_value:
+            continue
+
+        if not is_date_like(timestamp):
+            print(f"  ⚠️  Ignoring model row without date-like timestamp: {row[:2]}")
+            continue
+
+        try:
+            fair_value = float(raw_value.replace(",", ""))
+        except ValueError:
+            print(f"  ⚠️  Ignoring non-numeric model fair value: {raw_value!r}")
+            continue
+
+        if not (MODEL_FAIR_VALUE_MIN_C_KG <= fair_value <= MODEL_FAIR_VALUE_MAX_C_KG):
+            print(f"  ⚠️  Ignoring implausible model fair value: {fair_value}c/kg at {timestamp}")
+            continue
+
+        print(f"  Model fair value source: {fair_value}c/kg at {timestamp}")
+        return fair_value
+
+    print("  ⚠️  No plausible model fair value found.")
+    return None
 
 
 def score_listing(listing, fair_value_c_kg):
@@ -2466,6 +2511,28 @@ def send_alert(listing, flag, fair_value_c_kg, twilio_to):
         return False
 
 
+def validate_twilio_delivery_mode():
+    """
+    Require an explicit WhatsApp sender path before live sends.
+
+    The sandbox and registered sender paths have different delivery constraints;
+    forcing the operator to declare the path prevents accidental live runs with
+    an unexamined Twilio setup.
+    """
+    if TEST_MODE:
+        return
+
+    if TWILIO_WHATSAPP_MODE not in ("sandbox", "registered"):
+        raise RuntimeError(
+            "Set TWILIO_WHATSAPP_MODE to 'sandbox' or 'registered' before live sends."
+        )
+
+    if TWILIO_WHATSAPP_MODE == "sandbox":
+        print("  Twilio WhatsApp mode: sandbox — every recipient must have joined the sandbox.")
+    else:
+        print("  Twilio WhatsApp mode: registered — confirm freeform/template policy before live sends.")
+
+
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
@@ -2473,7 +2540,7 @@ def send_alert(listing, flag, fair_value_c_kg, twilio_to):
 def main():
     print("=" * 60)
     print("Cattle Scout — starting run")
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"Time: {utc_timestamp()}")
     print("=" * 60)
 
     # Fail fast if any required credential is missing from .env.
@@ -2481,7 +2548,6 @@ def main():
         "TWILIO_ACCOUNT_SID":       TWILIO_ACCOUNT_SID,
         "TWILIO_AUTH_TOKEN":        TWILIO_AUTH_TOKEN,
         "TWILIO_FROM":              TWILIO_FROM,
-        "GOOGLE_SHEETS_CREDS_FILE": GOOGLE_SHEETS_CREDS_FILE,
     }
     missing = [k for k, v in required_vars.items() if not v]
     if missing:
@@ -2489,15 +2555,10 @@ def main():
             f"Missing required environment variables: {missing}. "
             f"Check your .env file. See .env.example for the template."
         )
+    validate_twilio_delivery_mode()
 
     # Connect to Google Sheets
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds       = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDS_FILE, scope)
-    gc          = gspread.authorize(creds)
-    spreadsheet = gc.open(SPREADSHEET_NAME)
+    spreadsheet = open_spreadsheet(SPREADSHEET_NAME, creds_file=get_credentials_file())
 
     worksheet_log = get_or_create_worksheet(
         spreadsheet, LOG_TAB, rows=5000, cols=len(LOG_HEADER_V23)

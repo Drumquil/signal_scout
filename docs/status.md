@@ -45,7 +45,8 @@ Use:
 - Onboarding transform: `transform_form_response.py`
 - Workflow file: `.github/workflows/cattle_scout.yml`
 - Runtime schedule: 21:00 UTC and 03:00 UTC daily
-- Current production source remains AuctionsPlus only
+- Current production source remains AuctionsPlus only; Stockplace, RMA, and
+  authorised notice intake exist as explicitly gated prototype lanes.
 - Active validated dev profile: `tom_steers`
 
 ## Locked Decisions

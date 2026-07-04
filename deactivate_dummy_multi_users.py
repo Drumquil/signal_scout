@@ -3,27 +3,15 @@ Deactivate the dummy multi-user validation blocks while leaving them in the
 config sheet for later reuse.
 """
 
-import os
-from dotenv import load_dotenv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-load_dotenv()
+from sheets_client import open_worksheet
 
 SPREADSHEET_NAME = "drumquil_scout"
 CONFIG_TAB = "cattle_scout_config"
-CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
 TARGET_USERS = {"dummy_multi_a", "dummy_multi_b"}
 
 
 def main():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
-    ws = client.open(SPREADSHEET_NAME).worksheet(CONFIG_TAB)
+    ws = open_worksheet(CONFIG_TAB, spreadsheet_name=SPREADSHEET_NAME)
 
     rows = ws.get_all_values()
     updates = 0

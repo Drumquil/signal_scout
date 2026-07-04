@@ -5,16 +5,10 @@ The original dummy users are reactivated. A fresh validation pair is also added
 so the run produces enough new per-user rows to exercise batched Sheet writes.
 """
 
-import os
-from dotenv import load_dotenv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-load_dotenv()
+from sheets_client import open_worksheet
 
 SPREADSHEET_NAME = "drumquil_scout"
 CONFIG_TAB = "cattle_scout_config"
-CREDS_FILE = os.getenv("GOOGLE_SHEETS_CREDS_FILE")
 
 USERS = [
     "dummy_multi_a",
@@ -25,13 +19,7 @@ USERS = [
 
 
 def connect_config_sheet():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client.open(SPREADSHEET_NAME).worksheet(CONFIG_TAB)
+    return open_worksheet(CONFIG_TAB, spreadsheet_name=SPREADSHEET_NAME)
 
 
 def get_user_blocks(rows):

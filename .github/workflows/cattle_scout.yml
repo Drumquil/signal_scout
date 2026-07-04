@@ -26,13 +26,15 @@ jobs:
         run: python -m unittest discover -p "test_*.py"
 
       - name: Write Google credentials file
-        run: echo '${{ secrets.GOOGLE_SHEETS_CREDS }}' > google_credentials.json
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        run: printf '%s' "$GOOGLE_SHEETS_CREDS" > google_credentials.json
 
       - name: Run Signal Scout
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
-          TWILIO_TO: ${{ secrets.TWILIO_TO }}
           GOOGLE_SHEETS_CREDS_FILE: google_credentials.json
+          TWILIO_WHATSAPP_MODE: ${{ secrets.TWILIO_WHATSAPP_MODE }}
         run: python cattle_scout.py

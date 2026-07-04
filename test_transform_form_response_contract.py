@@ -4,6 +4,8 @@ from cattle_scout import load_config, listing_match
 from transform_form_response import (
     REQUIRED_RESPONSE_HEADERS,
     build_response_row_dict,
+    delete_user_rows,
+    find_user_row_indices,
     transform_response,
     validate_transformed_config_rows,
 )
@@ -15,6 +17,14 @@ class FakeWorksheet:
 
     def get_all_values(self):
         return self._rows
+
+
+class MutableFakeWorksheet(FakeWorksheet):
+    def col_values(self, column):
+        return [row[column - 1] if len(row) >= column else "" for row in self._rows]
+
+    def delete_rows(self, row_number):
+        del self._rows[row_number - 1]
 
 
 def make_response_row(overrides=None, use_legacy_breeding_header=False):
@@ -104,6 +114,21 @@ def make_listing(overrides=None):
 
 
 class TransformFormResponseContractTests(unittest.TestCase):
+    def test_duplicate_user_rows_are_found_and_deleted_bottom_up(self):
+        worksheet = MutableFakeWorksheet([
+            ["user_id", "setting", "value"],
+            ["beta_tester", "active", "TRUE"],
+            ["other_user", "active", "TRUE"],
+            ["beta_tester", "twilio_to", "whatsapp:+61400000000"],
+        ])
+
+        self.assertEqual(find_user_row_indices(worksheet, "beta_tester"), [2, 4])
+        self.assertEqual(delete_user_rows(worksheet, "beta_tester"), 2)
+        self.assertEqual(worksheet.get_all_values(), [
+            ["user_id", "setting", "value"],
+            ["other_user", "active", "TRUE"],
+        ])
+
     def test_commercial_only_profile_writes_commercial_gate(self):
         config = transform_to_runtime_config(
             {
