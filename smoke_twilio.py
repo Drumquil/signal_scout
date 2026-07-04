@@ -1,7 +1,9 @@
 """
-test_twilio.py
-Standalone test — verifies the Twilio WhatsApp credentials work
-and that a test message lands on the configured number.
+smoke_twilio.py
+Live smoke check — verifies the Twilio WhatsApp credentials work and that a
+test message lands on the configured number.
+
+This script has live side effects and is intentionally not named test_*.py.
 """
 
 import os

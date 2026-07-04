@@ -6,6 +6,10 @@ google_credentials.json
 __pycache__/
 *.py[cod]
 *.pyo
+.venv/
+
+# Local assistant/editor settings
+.claude/settings.local.json
 
 # VS Code
 .vscode/
@@ -16,6 +20,7 @@ Desktop.ini
 
 # Archive and zip files
 *.zip
+!references/**/*.ap-export.zip
 
 # Superseded documents — keep only current versions in repo
 files/
@@ -27,3 +32,17 @@ Drumquil_Signal_Cybersecurity_IP_Reference_v1_0.docx
 Drumquil_Signal_Cybersecurity_IP_Reference_v1_1.docx
 
 cattle_scout_config.csv
+
+# Authorised email / PDF intake samples — potentially sensitive operational data
+authorized_notice_raw/*
+!authorized_notice_raw/README.md
+!authorized_notice_raw/ktn_atom_item_template.json
+!authorized_notice_raw/ktn_atom_item_multi_record_template.json
+authorized_notice_samples/*
+!authorized_notice_samples/README.md
+!authorized_notice_samples/ktn_atom_item_normalized_example.json
+
+# ICM stage outputs are intentional repo artifacts; ad hoc temp extracts are not.
+.tmp_*.txt
+tmp_icm_extract*.txt
+tmp_extract_icm*.py

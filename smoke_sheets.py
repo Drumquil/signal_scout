@@ -1,7 +1,9 @@
 """
-test_sheets.py
-Standalone test — verifies the Google Sheets service account credentials
-work and that the script can write to the cattle_scout_log tab.
+smoke_sheets.py
+Live smoke check — verifies the Google Sheets service account credentials work
+and writes to the cattle_scout_log tab.
+
+This script has live side effects and is intentionally not named test_*.py.
 """
 
 import os
