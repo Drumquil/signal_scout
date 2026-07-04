@@ -1,0 +1,45 @@
+{
+  "message_id": "ktn-nutrien-2026-06-27-001",
+  "source_name": "Nutrien Ag Solutions",
+  "source_type": "email_notice",
+  "permission_status": "authorised_feed_only",
+  "source_confidence": 0.4,
+  "sender_email": "newsletter-abc123@kill-the-newsletter.com",
+  "received_at": "2026-06-27T08:30:00+10:00",
+  "subject": "Nutrien livestock sales alert",
+  "body_text": "Nutrien livestock sales alert. Northern Rivers Store Sale. 54 Station Mated Angus Cows. Casino, NSW. Catalogue link included below.",
+  "source_url": "https://nutrienagsolutions.com.au/livestock/sales/northern-rivers-store-sale",
+  "catalogue_url": "https://nutrienagsolutions.com.au/livestock/catalogues/northern-rivers-store-sale.pdf",
+  "feed_meta": {
+    "feed_type": "ktn_atom_item",
+    "feed_title": "Nutrien Sales Alerts",
+    "entry_id": "tag:kill-the-newsletter.com,2026-06-27:/feeds/abc123/entries/001",
+    "entry_link": "https://nutrienagsolutions.com.au/livestock/sales/northern-rivers-store-sale",
+    "published_at": "2026-06-27T08:25:00+10:00",
+    "ktn_inbox_label": "nutrien-sales-alerts"
+  },
+  "attachments": [
+    {
+      "file_name": "northern-rivers-store-sale.pdf",
+      "path": "catalogues/northern-rivers-store-sale.pdf"
+    }
+  ],
+  "records": [
+    {
+      "external_id": "nutrien-2026-06-27-001-1",
+      "title": "54 Station Mated Angus Cows",
+      "sale_name": "Northern Rivers Store Sale",
+      "sale_date": "2026-07-02",
+      "vendor": "Nutrien Ag Solutions",
+      "location": "Casino, NSW",
+      "state": "NSW",
+      "class": "station mated",
+      "listing_type": "commercial",
+      "listing_category": "breeding_female",
+      "catalogue_pending": false,
+      "num_head": 54,
+      "breed": "Angus",
+      "notes_raw": "Feed-derived notice sample. Use as a WATCHING-grade template unless richer catalogue detail is confirmed."
+    }
+  ]
+}

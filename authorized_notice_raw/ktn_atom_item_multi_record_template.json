@@ -1,0 +1,59 @@
+{
+  "source_name": "Elders",
+  "source_type": "email_notice",
+  "permission_status": "authorised_feed_only",
+  "source_confidence": 0.38,
+  "sender_email": "newsletter-def456@kill-the-newsletter.com",
+  "received_at": "2026-06-27T09:15:00+10:00",
+  "subject": "Elders branch cattle update",
+  "body_text": "Upcoming branch sales and sale-date notices for July. Multiple opportunities are summarised in one feed item.",
+  "catalogue_url": "https://elders.com.au/livestock/catalogues/july-branch-sales.pdf",
+  "feed_meta": {
+    "feed_type": "ktn_atom_item",
+    "feed_title": "Elders Branch Updates",
+    "entry_id": "tag:kill-the-newsletter.com,2026-06-27:/feeds/def456/entries/002",
+    "entry_link": "https://elders.com.au/livestock/branch-updates/july-cattle-sales",
+    "published_at": "2026-06-27T09:10:00+10:00",
+    "ktn_inbox_label": "elders-branch-updates"
+  },
+  "attachments": [
+    {
+      "file_name": "july-branch-sales.pdf",
+      "path": "catalogues/july-branch-sales.pdf"
+    }
+  ],
+  "records": [
+    {
+      "external_id": "elders-2026-07-03-casino",
+      "title": "Casino Store Sale Notice",
+      "sale_name": "Casino Store Sale",
+      "sale_date": "2026-07-03",
+      "vendor": "Elders Casino",
+      "location": "Casino, NSW",
+      "state": "NSW",
+      "class": "store sale notice",
+      "listing_type": "commercial",
+      "listing_category": "commercial",
+      "catalogue_pending": true,
+      "num_head": null,
+      "breed": "Unknown",
+      "notes_raw": "WATCHING-only sale notice example from a single Atom item."
+    },
+    {
+      "external_id": "elders-2026-07-05-lismore",
+      "title": "Lismore Prime Sale Notice",
+      "sale_name": "Lismore Prime Sale",
+      "sale_date": "2026-07-05",
+      "vendor": "Elders Lismore",
+      "location": "Lismore, NSW",
+      "state": "NSW",
+      "class": "prime sale notice",
+      "listing_type": "commercial",
+      "listing_category": "commercial",
+      "catalogue_pending": true,
+      "num_head": null,
+      "breed": "Unknown",
+      "notes_raw": "Second record from the same feed item."
+    }
+  ]
+}

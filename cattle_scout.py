@@ -32,13 +32,16 @@ Author: Tom Flanagan
 Version: 2.3 — May 2026
 """
 
+import json
 import os
+from pathlib import Path
+import re
 import sys
+import time
+
+import gspread
 import requests
 from bs4 import BeautifulSoup
-import time
-import re
-import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from gspread.exceptions import WorksheetNotFound
 from twilio.rest import Client
@@ -85,12 +88,82 @@ SEARCH_URL = (
     "?category=Steer-Heifer"
     "&mapView=0"
 )
+AUCTIONSPLUS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
 
 MAX_PAGES     = 5
 REQUEST_DELAY = 3
-TEST_MODE     = True    # Set to False when ready for production
+TEST_MODE     = os.getenv("TEST_MODE", "TRUE").strip().upper() in ("1", "TRUE", "YES", "Y")
 UNDERVALUED_THRESHOLD = 0.10
 OVERVALUED_THRESHOLD  = 0.10
+BATCH_WRITE_RETRIES   = 4
+BATCH_WRITE_BACKOFFS  = [15, 45, 90, 180]
+ENABLE_AUTHORIZED_NOTICE_SOURCE = os.getenv("ENABLE_AUTHORIZED_NOTICE_SOURCE", "FALSE").upper() == "TRUE"
+AUTHORIZED_NOTICE_SOURCE_DIR = os.getenv("AUTHORIZED_NOTICE_SOURCE_DIR", "authorized_notice_samples")
+ENABLE_STOCKPLACE_SOURCE = os.getenv("ENABLE_STOCKPLACE_SOURCE", "FALSE").upper() == "TRUE"
+STOCKPLACE_INDEX_URL = os.getenv("STOCKPLACE_INDEX_URL", "https://www.stockplace.com.au/stock")
+ENABLE_RMA_SOURCE = os.getenv("ENABLE_RMA_SOURCE", "FALSE").upper() == "TRUE"
+RMA_INDEX_URL = os.getenv("RMA_INDEX_URL", "https://www.rma.com.au/sales/cattle")
+
+SHARED_LISTING_DEFAULTS = {
+    "source": None,
+    "source_type": None,
+    "source_record_id": None,
+    "source_confidence": None,
+    "permission_status": None,
+    "sender_email": None,
+    "received_at": None,
+    "attachment_name": None,
+    "message_id": None,
+    "catalogue_url": None,
+    "notes_raw": None,
+    "listing_id": None,
+    "listing_type": "commercial",
+    "listing_category": "commercial",
+    "url": None,
+    "title": "Unknown",
+    "sale_name": "",
+    "sale_date": "",
+    "lot_number": None,
+    "catalogue_pending": False,
+    "vendor": "Unknown",
+    "pre_auction_text": "",
+    "num_head": None,
+    "num_calves": None,
+    "state": "Unknown",
+    "location": "Location unknown",
+    "class": "",
+    "sex": None,
+    "breed": "Unknown",
+    "breed_groups": [],
+    "horn_status": None,
+    "store_condition": None,
+    "temperament": None,
+    "avg_weight_kg": None,
+    "weight_at_assessment_kg": None,
+    "weight_min": None,
+    "weight_max": None,
+    "weight_range_kg": None,
+    "delivery_adjustment_pct": None,
+    "liveweight_gain_per_day": None,
+    "dressing_pct": None,
+    "fat_score": None,
+    "age_min_months": None,
+    "age_max_months": None,
+    "hours_off_feed": None,
+    "assessment_date": None,
+    "is_EU": False,
+    "is_NE": False,
+    "is_LPA": False,
+    "is_MSA": False,
+    "has_WHP": False,
+    "HGP_free": None,
+    "lifetime_traceable_pct": None,
+    "price_per_head": None,
+    "price_c_kg": None,
+    "sale_type_pricing": None,
+}
 
 # ─────────────────────────────────────────────
 # GOOGLE SHEETS TAB SCHEMAS (v2.3)
@@ -188,6 +261,140 @@ def ensure_listings_header(worksheet):
 
     ensure_header_row(worksheet, LISTINGS_HEADER_V23)
 
+
+def build_requests_session(headers=None):
+    """Create a per-source session for one run."""
+    session = requests.Session()
+    if headers:
+        session.headers.update(headers)
+    return session
+
+
+def normalise_shared_listing(listing, source_def):
+    """
+    Fill in shared runtime defaults and attach source metadata.
+
+    Existing AuctionsPlus parsers can keep returning sparse source-specific
+    dicts; this normaliser makes them safe for shared matching/logging.
+    """
+    shared = dict(SHARED_LISTING_DEFAULTS)
+    shared.update(listing or {})
+
+    shared["source"] = source_def["name"]
+    shared["source_type"] = source_def["source_type"]
+    shared["permission_status"] = source_def.get("permission_status")
+    shared["source_confidence"] = source_def.get("source_confidence")
+    shared["catalogue_url"] = shared.get("catalogue_url") or shared.get("url")
+
+    if not shared.get("url"):
+        return None
+
+    if shared.get("source_record_id") is None:
+        shared["source_record_id"] = shared.get("listing_id")
+
+    if shared.get("breed_groups") is None:
+        shared["breed_groups"] = []
+
+    return shared
+
+
+def parser_record_to_shared_listing(record):
+    """
+    Map a standalone parser-spike record into the shared runtime listing shape.
+
+    This lets new source modules reuse the parser spike normalised contract
+    without forcing AuctionsPlus-specific fields into the parser itself.
+    """
+    if not isinstance(record, dict):
+        return None
+
+    return {
+        "url": record.get("source_url"),
+        "source_record_id": record.get("source_record_id"),
+        "source_confidence": record.get("source_confidence"),
+        "catalogue_url": record.get("catalogue_url"),
+        "title": record.get("listing_title") or record.get("sale_name") or "Unknown",
+        "sale_name": record.get("sale_name") or record.get("listing_title") or "",
+        "sale_date": record.get("sale_date") or "",
+        "listing_type": "commercial",
+        "listing_category": record.get("listing_category") or "commercial",
+        "catalogue_pending": bool(record.get("catalogue_pending", False)),
+        "vendor": (
+            record.get("agent_name")
+            or record.get("contact_name")
+            or record.get("source_name")
+            or "Unknown"
+        ),
+        "pre_auction_text": record.get("class_breakdown_raw") or record.get("notes_raw") or "",
+        "num_head": record.get("num_head"),
+        "state": record.get("state") or "Unknown",
+        "location": record.get("location") or "Location unknown",
+        "class": record.get("class") or "",
+        "sex": record.get("sex"),
+        "breed": record.get("breed") or "Unknown",
+        "breed_groups": record.get("breed_groups") or [],
+        "avg_weight_kg": record.get("avg_weight_kg"),
+        "weight_min": record.get("weight_min"),
+        "weight_max": record.get("weight_max"),
+        "weight_range_kg": record.get("weight_range_kg"),
+        "price_per_head": record.get("price_per_head"),
+        "price_c_kg": record.get("price_c_kg"),
+        "sale_type_pricing": record.get("price_type") or record.get("sale_type"),
+        "notes_raw": record.get("notes_raw"),
+    }
+
+
+def get_source_definitions():
+    """
+    Return the enabled source modules for this run.
+
+    AuctionsPlus stays live by default. Authorised notice ingestion remains
+    opt-in until Tom has a real mailbox/feed to point it at.
+    """
+    sources = [
+        {
+            "name": "auctionsplus",
+            "source_type": "auction_listing",
+            "enabled": True,
+            "discover_items": get_auctionsplus_listing_urls,
+            "scrape_item": scrape_auctionsplus_listing,
+            "session_factory": lambda: build_requests_session(AUCTIONSPLUS_HEADERS),
+            "permission_status": "permission_first_beta",
+            "source_confidence": 0.9,
+        },
+        {
+            "name": "authorised_notice_proto",
+            "source_type": "email_notice",
+            "enabled": ENABLE_AUTHORIZED_NOTICE_SOURCE,
+            "discover_items": get_authorized_notice_paths,
+            "scrape_item": scrape_authorized_notice,
+            "session_factory": None,
+            "permission_status": "authorised_feed_only",
+            "source_confidence": 0.45,
+        },
+        {
+            "name": "stockplace",
+            "source_type": "agent_direct_listing",
+            "enabled": ENABLE_STOCKPLACE_SOURCE,
+            "discover_items": get_stockplace_source_pages,
+            "scrape_item": scrape_stockplace_source,
+            "session_factory": lambda: build_requests_session(AUCTIONSPLUS_HEADERS),
+            "permission_status": "permission_first_prototype",
+            "source_confidence": 0.5,
+        },
+        {
+            "name": "rma",
+            "source_type": "agency_network_sale_index",
+            "enabled": ENABLE_RMA_SOURCE,
+            "discover_items": get_rma_source_pages,
+            "scrape_item": scrape_rma_source,
+            "session_factory": lambda: build_requests_session(AUCTIONSPLUS_HEADERS),
+            "permission_status": "permission_first_prototype",
+            "source_confidence": 0.5,
+        },
+    ]
+    return [source for source in sources if source["enabled"]]
+
 # ─────────────────────────────────────────────
 # CLASS DETECTION CONSTANTS
 # These are the joining/pregnancy status qualifiers that identify breeding
@@ -205,6 +412,23 @@ BREEDING_FEMALE_QUALIFIERS = [
     "ptic", "nsm", "aid", "ai'd", "ai'", "caf", "station mated", "joined",
     "mated", "future breeder", "future breeders", "joining"
 ]
+
+
+def contains_phrase(text, phrase, allow_plural=False):
+    """
+    Boundary-aware phrase match for cattle class terms.
+
+    Uses alphanumeric boundaries rather than raw substring matching so town
+    names like Braidwood do not trigger the "aid" breeding qualifier.
+    """
+    escaped = re.escape(phrase).replace(r"\ ", r"\s+")
+    if allow_plural and " " not in phrase and not phrase.endswith("s"):
+        if phrase == "calf":
+            escaped = r"(?:calf|calves)"
+        else:
+            escaped = f"{escaped}s?"
+    pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
+    return re.search(pattern, text) is not None
 
 
 # ─────────────────────────────────────────────
@@ -247,7 +471,7 @@ def load_config(worksheet_config):
     bool_fields = {
         "active", "require_EU", "require_NE", "exclude_WHP",
         "include_breeding_females", "include_bulls", "include_stud",
-        "include_cow_calf_units", "bull_require_EBV", "require_vendor",
+        "include_cow_calf_units", "include_commercial", "bull_require_EBV", "require_vendor",
         "require_HGP_free", "require_polled", "require_quiet",
     }
     numeric_fields = {
@@ -266,6 +490,7 @@ def load_config(worksheet_config):
     # Build a dict-of-dicts keyed by user_id while reading rows.
     # We preserve insertion order so users alert in the order they appear in the Sheet.
     raw_users = {}   # { user_id: { setting: parsed_value, ... } }
+    invalid_numeric_values = {}  # { user_id: [(setting, raw_value), ...] }
 
     for row in rows[1:]:   # skip header row
         # Each row must have at least 3 columns: user_id | setting | value
@@ -288,9 +513,10 @@ def load_config(worksheet_config):
             raw_users[user_id][key] = value.upper() == "TRUE"
         elif key in numeric_fields:
             try:
-                raw_users[user_id][key] = float(value)
+                raw_users[user_id][key] = float(value.replace(",", ""))
             except ValueError:
                 raw_users[user_id][key] = None
+                invalid_numeric_values.setdefault(user_id, []).append((key, value))
         else:
             raw_users[user_id][key] = value
 
@@ -304,6 +530,13 @@ def load_config(worksheet_config):
         if not cfg.get("twilio_to"):
             print(f"  ⚠️  Config: user '{user_id}' has no twilio_to — skipping.")
             continue
+        if invalid_numeric_values.get(user_id):
+            bad_values = ", ".join(
+                f"{setting}={raw_value!r}"
+                for setting, raw_value in invalid_numeric_values[user_id]
+            )
+            print(f"  ⚠️  Config: user '{user_id}' has invalid numeric setting(s): {bad_values} — skipping.")
+            continue
         active_users.append(cfg)
 
     print(f"Config loaded: {len(active_users)} active user(s): {[u['user_id'] for u in active_users]}")
@@ -314,16 +547,16 @@ def load_config(worksheet_config):
 # STEP 2 — SCRAPE LISTING URLS
 # ─────────────────────────────────────────────
 
-def get_listing_urls(max_pages=MAX_PAGES):
+def get_auctionsplus_listing_urls(max_pages=MAX_PAGES, session=None):
     """Collect individual lot URLs from AuctionsPlus search results pages."""
     listing_urls = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    http = session or requests
 
     for page in range(1, max_pages + 1):
         url = f"{SEARCH_URL}&page={page}"
         print(f"Scanning page {page}: {url}")
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            response = http.get(url, headers=AUCTIONSPLUS_HEADERS, timeout=15)
         except Exception as e:
             # Network error on a search page — log and skip to next page rather than abort
             print(f"  ⚠️  Network error fetching page {page}: {e} — skipping page.")
@@ -354,16 +587,60 @@ def get_listing_urls(max_pages=MAX_PAGES):
     return listing_urls
 
 
+def get_listing_urls(max_pages=MAX_PAGES, session=None):
+    """Backward-compatible wrapper for existing helpers/tests."""
+    return get_auctionsplus_listing_urls(max_pages=max_pages, session=session)
+
+
+def get_authorized_notice_paths():
+    """
+    Discover local authorised notice samples.
+
+    The prototype source is intentionally file-based and opt-in so we can test
+    the shared runtime without scraping a second live platform yet.
+    """
+    source_dir = Path(AUTHORIZED_NOTICE_SOURCE_DIR)
+    if not source_dir.exists():
+        print(f"Authorised notice source directory not found: {source_dir}")
+        return []
+
+    paths = sorted(source_dir.glob("*.json"))
+    print(f"Authorised notice sample files found: {len(paths)}")
+    return [str(path) for path in paths]
+
+
+def get_stockplace_source_pages(session=None):
+    """
+    Discover the public Stockplace index pages to parse.
+
+    The runtime starts with a single index URL and lets the parser module
+    extract multiple listing records from that one page.
+    """
+    del session
+    return [STOCKPLACE_INDEX_URL]
+
+
+def get_rma_source_pages(session=None):
+    """
+    Discover the public RMA cattle sales index pages to parse.
+
+    The runtime starts with a single RMA sales page and lets the parser module
+    emit multiple sale records from that one source page.
+    """
+    del session
+    return [RMA_INDEX_URL]
+
+
 # ─────────────────────────────────────────────
 # STEP 3 — LISTING TYPE DETECTION
 # ─────────────────────────────────────────────
 
 # Sale slug fragments that reliably identify stud/genetics auctions.
-# Used as a cheap pre-scrape filter — if the URL slug contains any of these,
-# the listing is skipped without fetching (when bulls/stud are disabled).
-# This list should be extended as new stud sale formats appear.
+# Kept as a helper for source-specific classification work and future
+# optimisations, but the shared-listing runtime no longer uses it to make
+# user-specific scrape decisions.
 # Saleyard dispersals, store cattle sales, and on-property commercial sales
-# must NOT appear here — they should always be scraped.
+# must NOT appear here.
 STUD_SALE_SLUG_MARKERS = [
     "bull-sale",
     "stud-genetics",
@@ -484,15 +761,15 @@ def detect_class(title, pre_auction_text):
 
     # ── Pass 1: Cow-and-calf ──
     # Title must contain "&" (compound lot) AND a calf indicator in title or pre-auction text
-    has_ampersand  = "&" in title or "and" in title_lower
-    has_calf       = any(c in title_lower for c in CALF_INDICATORS)
+    has_ampersand  = "&" in title or re.search(r"\band\b", title_lower) is not None
+    has_calf       = any(contains_phrase(title_lower, c, allow_plural=True) for c in CALF_INDICATORS)
     has_calf_foot  = "calves at foot" in pre_lower or "calf at foot" in pre_lower
     if has_ampersand and (has_calf or has_calf_foot):
         return ("cow-and-calf", "cow_calf_unit")
 
     # ── Pass 2: Breeding female ──
     for qualifier in BREEDING_FEMALE_QUALIFIERS:
-        if qualifier in title_lower:
+        if contains_phrase(title_lower, qualifier):
             return (qualifier, "breeding_female")
 
     # ── Pass 3: Commercial store class ──
@@ -501,7 +778,7 @@ def detect_class(title, pre_auction_text):
         "backgrounder", "store", "feeder", "steer", "heifer", "cow", "bull"
     ]
     for cls in commercial_classes:
-        if cls in title_lower:
+        if contains_phrase(title_lower, cls, allow_plural=True):
             category = "bull" if cls == "bull" else "commercial"
             return (cls, category)
 
@@ -1377,51 +1654,301 @@ def scrape_stud_listing(url, soup, page_text):
 # STEP 6 — SCRAPE DISPATCHER
 # ─────────────────────────────────────────────
 
-def scrape_listing(url, config):
+def scrape_auctionsplus_listing(url, session=None):
     """
     Fetches a listing page and routes it to the correct parser.
 
     Two-step classification:
-      Step 1 — Slug pre-filter (no HTTP request):
-        If the sale slug contains a known stud/genetics marker AND bulls/stud
-        are both disabled, skip without scraping. Fast and cheap.
-
-      Step 2 — Content classification (post-fetch):
+      Step 1 — Content classification (post-fetch):
         detect_listing_type() inspects the fetched HTML to determine whether
         the listing is a commercial mob or a stud/genetics individual.
         URL path is a hint only — content takes precedence.
     """
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-    # Step 1: cheap slug pre-filter — skip obvious stud sales without fetching
-    if is_stud_sale_url(url):
-        if not config.get("include_bulls") and not config.get("include_stud"):
-            print(f"  Skipping stud sale (slug marker): {url}")
-            return None
+    http = session or requests
 
     try:
         print(f"  Scraping: {url}")
-        response = requests.get(url, headers=headers, timeout=15)
+        response = http.get(url, headers=AUCTIONSPLUS_HEADERS, timeout=15)
         if response.status_code != 200:
             return None
         soup      = BeautifulSoup(response.text, "html.parser")
         page_text = soup.get_text(separator="\n", strip=True)
 
-        # Step 2: content-based classification
+        # Step 1: content-based classification
         listing_type = detect_listing_type(url, soup, page_text)
 
         if listing_type == "commercial":
             return scrape_commercial_listing(url, soup, page_text)
         elif listing_type == "stud":
-            if not config.get("include_bulls") and not config.get("include_stud"):
-                print(f"  Skipping stud listing (content classified): {url}")
-                return None
             return scrape_stud_listing(url, soup, page_text)
         else:
             return None
     except Exception as e:
         print(f"  ⚠️  Error scraping {url}: {e}")
         return None
+
+
+def scrape_listing(url, session=None):
+    """Backward-compatible wrapper for existing helpers/tests."""
+    return scrape_auctionsplus_listing(url, session=session)
+
+
+def scrape_authorized_notice(path, session=None):
+    """
+    Parse a locally stored authorised notice record.
+
+    Expected file shape: one JSON object using either shared-listing field names
+    directly or simple aliases such as source_url, source_record_id, and
+    listing_title.
+    """
+    del session  # File-backed source does not use HTTP sessions.
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as e:
+        print(f"  ⚠️  Error reading authorised notice {path}: {e}")
+        return None
+
+    if not isinstance(payload, dict):
+        print(f"  ⚠️  Authorised notice file must contain one JSON object: {path}")
+        return None
+
+    source_url = payload.get("url") or payload.get("source_url") or f"file://{Path(path).resolve().as_posix()}"
+    listing = {
+        "url": source_url,
+        "source_record_id": payload.get("source_record_id"),
+        "source_confidence": payload.get("source_confidence"),
+        "sender_email": payload.get("sender_email"),
+        "received_at": payload.get("received_at"),
+        "attachment_name": payload.get("attachment_name"),
+        "message_id": payload.get("message_id"),
+        "title": payload.get("title") or payload.get("listing_title") or payload.get("sale_name") or Path(path).stem,
+        "sale_name": payload.get("sale_name") or payload.get("title") or "",
+        "sale_date": payload.get("sale_date") or "",
+        "listing_type": payload.get("listing_type") or "commercial",
+        "listing_category": payload.get("listing_category") or "commercial",
+        "catalogue_pending": bool(payload.get("catalogue_pending", False)),
+        "vendor": payload.get("vendor") or payload.get("agent_name") or "Unknown",
+        "pre_auction_text": payload.get("pre_auction_text") or payload.get("notes_raw") or "",
+        "num_head": payload.get("num_head"),
+        "num_calves": payload.get("num_calves"),
+        "state": payload.get("state") or "Unknown",
+        "location": payload.get("location") or "Location unknown",
+        "class": payload.get("class") or payload.get("stock_type") or "",
+        "sex": payload.get("sex"),
+        "breed": payload.get("breed") or "Unknown",
+        "breed_groups": payload.get("breed_groups") or [],
+        "horn_status": payload.get("horn_status"),
+        "store_condition": payload.get("store_condition"),
+        "temperament": payload.get("temperament"),
+        "avg_weight_kg": payload.get("avg_weight_kg"),
+        "weight_at_assessment_kg": payload.get("weight_at_assessment_kg"),
+        "weight_min": payload.get("weight_min"),
+        "weight_max": payload.get("weight_max"),
+        "weight_range_kg": payload.get("weight_range_kg"),
+        "delivery_adjustment_pct": payload.get("delivery_adjustment_pct"),
+        "liveweight_gain_per_day": payload.get("liveweight_gain_per_day"),
+        "dressing_pct": payload.get("dressing_pct"),
+        "fat_score": payload.get("fat_score"),
+        "age_min_months": payload.get("age_min_months"),
+        "age_max_months": payload.get("age_max_months"),
+        "hours_off_feed": payload.get("hours_off_feed"),
+        "assessment_date": payload.get("assessment_date"),
+        "is_EU": payload.get("is_EU", False),
+        "is_NE": payload.get("is_NE", False),
+        "is_LPA": payload.get("is_LPA", False),
+        "is_MSA": payload.get("is_MSA", False),
+        "has_WHP": payload.get("has_WHP", False),
+        "HGP_free": payload.get("HGP_free"),
+        "lifetime_traceable_pct": payload.get("lifetime_traceable_pct"),
+        "price_per_head": payload.get("price_per_head"),
+        "price_c_kg": payload.get("price_c_kg"),
+        "sale_type_pricing": payload.get("sale_type_pricing"),
+        "catalogue_url": payload.get("catalogue_url") or source_url,
+        "notes_raw": payload.get("notes_raw"),
+    }
+    return listing
+
+
+def scrape_stockplace_source(url, session=None):
+    """
+    Parse the public Stockplace index page into one or more shared listings.
+
+    This source stays disabled by default. It is wired behind a feature flag so
+    we can prove the shared source boundary before exposing it to beta users.
+    """
+    try:
+        from source_parser_spikes import parse_stockplace_html
+    except Exception as e:
+        print(f"  ⚠️  Could not import Stockplace parser: {e}")
+        return None
+
+    http = session or requests
+    try:
+        response = http.get(url, timeout=30)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"  ⚠️  Error fetching Stockplace page {url}: {e}")
+        return None
+
+    def detail_fetcher(detail_url):
+        detail_response = http.get(detail_url, timeout=30)
+        detail_response.raise_for_status()
+        return detail_response.text
+
+    try:
+        records, _summary = parse_stockplace_html(response.text, url, detail_fetcher=detail_fetcher)
+    except Exception as e:
+        print(f"  ⚠️  Error parsing Stockplace page {url}: {e}")
+        return None
+
+    listings = []
+    for record in records:
+        listing = parser_record_to_shared_listing(record)
+        if listing:
+            listings.append(listing)
+
+    return listings
+
+
+def scrape_rma_source(url, session=None):
+    """
+    Parse the public RMA cattle sales index into one or more shared listings.
+
+    This source stays opt-in so we can prove the aggregator path before using
+    it in any live beta-facing run.
+    """
+    try:
+        from source_parser_spikes import parse_rma_html
+    except Exception as e:
+        print(f"  ⚠️  Could not import RMA parser: {e}")
+        return None
+
+    http = session or requests
+    try:
+        response = http.get(url, timeout=30)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"  ⚠️  Error fetching RMA page {url}: {e}")
+        return None
+
+    try:
+        records, _summary = parse_rma_html(response.text, url)
+    except Exception as e:
+        print(f"  ⚠️  Error parsing RMA page {url}: {e}")
+        return None
+
+    listings = []
+    for record in records:
+        listing = parser_record_to_shared_listing(record)
+        if listing:
+            listings.append(listing)
+
+    return listings
+
+
+def collect_listings(listing_urls, session=None):
+    """
+    Scrape each listing URL once for the whole run.
+
+    The returned shared listing set is then matched independently against each
+    active user config. This avoids re-fetching the same page per user.
+    """
+    shared_listings = []
+
+    for url in listing_urls:
+        listing = scrape_listing(url, session=session)
+        time.sleep(REQUEST_DELAY)
+        if listing:
+            shared_listings.append(listing)
+
+    print(f"Shared listings scraped this run: {len(shared_listings)}")
+    return shared_listings
+
+
+def collect_source_listings(source_defs):
+    """
+    Discover and scrape each enabled source once per run.
+
+    Returns one shared normalised listing list for downstream per-user matching.
+    """
+    shared_listings = []
+
+    for source_def in source_defs:
+        print(f"\nCollecting source: {source_def['name']}")
+        session = source_def["session_factory"]() if source_def.get("session_factory") else None
+        items = source_def["discover_items"](session=session) if session else source_def["discover_items"]()
+
+        discovered = len(items)
+        scraped = 0
+        skipped = 0
+        seen_urls = set()
+
+        for item in items:
+            listing = source_def["scrape_item"](item, session=session)
+            if session:
+                time.sleep(REQUEST_DELAY)
+            if not listing:
+                skipped += 1
+                continue
+
+            listing_batch = listing if isinstance(listing, list) else [listing]
+            batch_scraped = 0
+
+            for single_listing in listing_batch:
+                shared = normalise_shared_listing(single_listing, source_def)
+                if not shared:
+                    skipped += 1
+                    continue
+
+                if shared["url"] in seen_urls:
+                    skipped += 1
+                    continue
+
+                seen_urls.add(shared["url"])
+                shared_listings.append(shared)
+                scraped += 1
+                batch_scraped += 1
+
+            if batch_scraped == 0:
+                skipped += 1
+
+        print(
+            f"  Source summary [{source_def['name']}]: "
+            f"discovered={discovered}, scraped={scraped}, skipped={skipped}"
+        )
+
+    print(f"\nShared listings scraped this run: {len(shared_listings)}")
+    return shared_listings
+
+
+def breeding_female_type_matches(listing, config):
+    """
+    Match breeding-female listings against coarse female-type preferences.
+
+    "cow" means a female that has already calved.
+    "heifer" means a female that has not yet calved.
+    """
+    allowed_types = [t.lower() for t in config.get("breeding_female_classes", []) if t]
+    if not allowed_types:
+        return True
+
+    title_lower = listing.get("title", "").lower()
+    pre_lower = listing.get("pre_auction_text", "").lower()
+    combined = f"{title_lower} {pre_lower}"
+
+    if "heifer" in combined:
+        female_type = "heifer"
+    elif "cow" in combined:
+        female_type = "cow"
+    else:
+        female_type = None
+
+    if female_type is None:
+        return True
+
+    return female_type in allowed_types
 
 
 # ─────────────────────────────────────────────
@@ -1452,16 +1979,21 @@ def listing_match(listing, config):
         return False, "config inactive"
 
     # ── Category gate ──
-    category = listing["listing_category"]
+    category = listing.get("listing_category")
     if category == "cow_calf_unit":
         if not config.get("include_cow_calf_units"):
             return False, "cow_calf_units disabled"
     elif category == "breeding_female":
         if not config.get("include_breeding_females"):
             return False, "breeding_females disabled"
+        if not breeding_female_type_matches(listing, config):
+            return False, "breeding_female type mismatch"
     elif category == "bull":
         if not config.get("include_bulls"):
             return False, "bulls disabled"
+    elif category == "commercial":
+        if not config.get("include_commercial", True):
+            return False, "commercial disabled"
 
     # ── State filter ──
     target_states = [s.upper() for s in config.get("target_states", [])]
@@ -1469,7 +2001,7 @@ def listing_match(listing, config):
         return False, f"state={listing['state']} not in {target_states}"
 
     # ── Class filter — commercial only ──
-    listing_class = listing["class"].lower()
+    listing_class = (listing.get("class") or "").lower()
     if category == "commercial":
         active_classes = list(config.get("target_classes", []))
         if active_classes and not any(tc in listing_class for tc in active_classes):
@@ -1497,8 +2029,9 @@ def listing_match(listing, config):
 
     # ── Sale type filter ──
     sale_types = [st.lower() for st in config.get("sale_types", [])]
-    if sale_types and not any(st in listing["sale_name"].lower() for st in sale_types):
-        return False, f"sale_name={listing['sale_name']!r} not in sale_types"
+    sale_name_lower = (listing.get("sale_name") or "").lower()
+    if sale_types and not any(st in sale_name_lower for st in sale_types):
+        return False, f"sale_name={listing.get('sale_name')!r} not in sale_types"
 
     # ── Select weight/age/fat config set ──
     is_bull = (category == "bull")
@@ -1612,12 +2145,27 @@ def get_log_status(worksheet):
         return status_map
     except Exception as e:
         print(f"  ⚠️  Could not read log: {e}")
-        return {}
+        raise RuntimeError("Could not read dedup log; aborting run to avoid duplicate alerts.") from e
 
 
-def log_listing(worksheet, listing, status, user_id, flag=None):
+def runtime_log_status(status):
+    """Keep TEST_MODE rows from suppressing the first live production send."""
+    return f"TEST_{status}" if TEST_MODE else status
+
+
+def is_dedup_alerted(status):
+    """Production ALERTED always suppresses; TEST_ALERTED suppresses test runs only."""
+    return status == "ALERTED" or (TEST_MODE and status == "TEST_ALERTED")
+
+
+def is_dedup_watching(status):
+    """Production WATCHING always suppresses; TEST_WATCHING suppresses test runs only."""
+    return status == "WATCHING" or (TEST_MODE and status == "TEST_WATCHING")
+
+
+def build_log_listing_row(listing, status, user_id, flag=None):
     """
-    Adds a lean row to cattle_scout_log (deduplication and audit trail).
+    Build a lean cattle_scout_log row for batched writing.
 
     Column layout (v2.3 — user_id prepended):
       A: user_id  B: url  C: status  D: title  E: category  F: class
@@ -1652,24 +2200,13 @@ def log_listing(worksheet, listing, status, user_id, flag=None):
         flag or "",                                                                 # R  flag
         datetime.now().strftime("%Y-%m-%d %H:%M"),                                  # S  logged_at
     ]
-    try:
-        worksheet.append_row(row, table_range="A1")
-    except Exception as e:
-        print(f"  ⚠️  Log write failed for {listing['url']}: {e} — retrying in 10s...")
-        time.sleep(10)
-        try:
-            worksheet.append_row(row, table_range="A1")
-            print(f"  ✅  Log write succeeded on retry: {listing['url']}")
-        except Exception as e2:
-            print(
-                f"  ⚠️  Log write FAILED after retry for {listing['url']}: {e2}\n"
-                f"  Add this row to cattle_scout_log manually to prevent duplicate alert."
-            )
+    return row
 
 
-def log_listing_full(worksheet, listing, status, flag, fair_value, user_id):
+def build_listing_full_row(listing, status, flag, fair_value, user_id):
     """
-    Writes the full 45-column field set to cattle_scout_listings.
+    Build the full cattle_scout_listings row for batched writing.
+
     One row per alerted listing — append-only, never updated in place.
 
     Column layout (v2.3 — user_id prepended to column A, all others shift right):
@@ -1755,20 +2292,32 @@ def log_listing_full(worksheet, listing, status, flag, fair_value, user_id):
         n(fair_value),                                      # AR fair_value_at_alert
         b(listing.get("catalogue_pending")),                # AS catalogue_pending
     ]
+    return row
 
-    try:
-        worksheet.append_row(row, table_range="A1")
-    except Exception as e:
-        print(f"  ⚠️  Listings write failed for {listing['url']}: {e} — retrying in 10s...")
-        time.sleep(10)
+
+def append_rows_with_retry(worksheet, rows, label):
+    """Append buffered rows in one API call, retrying across quota windows."""
+    if not rows:
+        print(f"No {label} rows to write.")
+        return True
+
+    for attempt in range(1, BATCH_WRITE_RETRIES + 1):
         try:
-            worksheet.append_row(row, table_range="A1")
-            print(f"  ✅  Listings write succeeded on retry: {listing['url']}")
-        except Exception as e2:
-            print(
-                f"  ⚠️  Listings write FAILED after retry for {listing['url']}: {e2}\n"
-                f"  Row not written to cattle_scout_listings — manual entry may be needed."
-            )
+            worksheet.append_rows(rows, value_input_option="RAW", table_range="A1")
+            print(f"  ✅  Wrote {len(rows)} {label} row(s) in one batch.")
+            return True
+        except Exception as e:
+            if attempt == BATCH_WRITE_RETRIES:
+                print(
+                    f"  ⚠️  {label} batch write FAILED after {attempt} attempts: {e}\n"
+                    f"  {len(rows)} buffered {label} row(s) were not written."
+                )
+                return False
+
+            delay = BATCH_WRITE_BACKOFFS[min(attempt - 1, len(BATCH_WRITE_BACKOFFS) - 1)]
+            print(f"  ⚠️  {label} batch write failed on attempt {attempt}: {e}")
+            print(f"  Retrying {label} batch in {delay}s...")
+            time.sleep(delay)
 
 
 # ─────────────────────────────────────────────
@@ -1823,13 +2372,15 @@ def send_watching_alert(listing, twilio_to):
     )
     if TEST_MODE:
         print(f"  [TEST MODE — no WhatsApp sent]\n  Message would be:\n{message}")
-        return
+        return True
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         client.messages.create(body=message, from_=TWILIO_FROM, to=twilio_to)
         print(f"  👁  Watching alert sent: {listing['title']}")
+        return True
     except Exception as e:
         print(f"  ⚠️  Watching alert FAILED for {listing['title']}: {e}")
+        return False
 
 
 def send_alert(listing, flag, fair_value_c_kg, twilio_to):
@@ -1904,13 +2455,15 @@ def send_alert(listing, flag, fair_value_c_kg, twilio_to):
 
     if TEST_MODE:
         print(f"  [TEST MODE — no WhatsApp sent]\n  Message would be:\n{message}")
-        return
+        return True
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         client.messages.create(body=message, from_=TWILIO_FROM, to=twilio_to)
         print(f"  🐄  Alert sent: {listing['title']}")
+        return True
     except Exception as e:
         print(f"  ⚠️  Alert FAILED for {listing['title']}: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -1988,8 +2541,11 @@ def main():
     fair_value = get_model_fair_value(worksheet_model)
     print(f"Model fair value: {fair_value}c/kg lwt" if fair_value else "Model fair value: not available.")
 
-    # Scrape listing URLs once — same URL set is evaluated for all users.
-    listing_urls = get_listing_urls()
+    # Discover and scrape listings once per enabled source — the shared result
+    # set is then evaluated independently for each user.
+    source_defs = get_source_definitions()
+    print(f"Enabled sources this run: {[source['name'] for source in source_defs]}")
+    shared_listings = collect_source_listings(source_defs)
 
     # ── Outer loop: iterate over each active user ──
     # For each user we run the full filter and alert pipeline independently.
@@ -2012,19 +2568,16 @@ def main():
 
         alerts_sent   = 0
         watching_sent = 0
+        user_log_rows = []
+        user_listing_rows = []
 
-        for url in listing_urls:
+        for listing in shared_listings:
+            url = listing["url"]
             # Per-user dedup: check (url, user_id) tuple in the log.
             existing_status = log_status.get((url, user_id))
 
-            if existing_status == "ALERTED":
-                print(f"  Skipping (already alerted {user_id}): {url}")
-                continue
-
-            listing = scrape_listing(url, user_config)
-            time.sleep(REQUEST_DELAY)
-
-            if not listing:
+            if is_dedup_alerted(existing_status):
+                print(f"  Skipping (already alerted {user_id}, status={existing_status}): {url}")
                 continue
 
             matched, reason = listing_match(listing, user_config)
@@ -2038,22 +2591,48 @@ def main():
 
             # ── Two-stage alert logic ──
             if listing["catalogue_pending"]:
-                if existing_status != "WATCHING":
-                    send_watching_alert(listing, twilio_to)
-                    log_listing(worksheet_log, listing, "WATCHING", user_id)
-                    log_listing_full(worksheet_listings, listing, "WATCHING", None, None, user_id)
-                    # Update local log_status so subsequent users in this run see the write.
-                    log_status[(url, user_id)] = "WATCHING"
+                if not is_dedup_watching(existing_status):
+                    if not send_watching_alert(listing, twilio_to):
+                        print("  Watching alert not logged; it will retry on the next run.")
+                        continue
+
+                    status = runtime_log_status("WATCHING")
+                    user_log_rows.append(build_log_listing_row(listing, status, user_id))
+                    user_listing_rows.append(build_listing_full_row(listing, status, None, None, user_id))
+                    # Update local log_status immediately so this run dedups
+                    # against buffered writes before they are flushed.
+                    log_status[(url, user_id)] = status
                     watching_sent += 1
                 else:
                     print(f"  Already watching ({user_id}): {listing['title']}")
             else:
                 flag = score_listing(listing, fair_value)
-                send_alert(listing, flag, fair_value, twilio_to)
-                log_listing(worksheet_log, listing, "ALERTED", user_id, flag or "No valuation")
-                log_listing_full(worksheet_listings, listing, "ALERTED", flag, fair_value, user_id)
-                log_status[(url, user_id)] = "ALERTED"
+                if not send_alert(listing, flag, fair_value, twilio_to):
+                    print("  Alert not logged; it will retry on the next run.")
+                    continue
+
+                status = runtime_log_status("ALERTED")
+                user_log_rows.append(
+                    build_log_listing_row(listing, status, user_id, flag or "No valuation")
+                )
+                user_listing_rows.append(
+                    build_listing_full_row(listing, status, flag, fair_value, user_id)
+                )
+                log_status[(url, user_id)] = status
                 alerts_sent += 1
+
+        if user_log_rows or user_listing_rows:
+            print(f"\nFlushing Google Sheets writes for user '{user_id}'...")
+            log_write_ok = append_rows_with_retry(worksheet_log, user_log_rows, "log")
+            if not log_write_ok:
+                raise RuntimeError(
+                    "Dedup log write failed after successful alert sends; "
+                    "aborting before processing more users."
+                )
+
+            listings_write_ok = append_rows_with_retry(worksheet_listings, user_listing_rows, "listings")
+            if not listings_write_ok:
+                print("  ⚠️  Analytical listings history may be incomplete because listing rows failed to write.")
 
         print(f"  User '{user_id}' — Watching: {watching_sent}. Alerts: {alerts_sent}.")
         total_alerts   += alerts_sent
