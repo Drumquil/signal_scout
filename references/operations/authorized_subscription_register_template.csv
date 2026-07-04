@@ -1,0 +1,11 @@
+source_name,channel_type,signup_or_source_url,legal_posture,permission_status,mailbox_used,subscription_date,last_notice_received_at,unsubscribed,notes
+Nutrien Ag Solutions,email_alert,https://www.nutrienagsolutions.com.au/livestock/livestock-sales-alert,GREEN,subscribe_now,alerts@your-domain.com,,,,Strongest national authorised alert source
+Ramsey & Bulmer,email_mailing_list,https://www.ramseybulmer.com.au/,AMBER,subscribe_now,alerts@your-domain.com,,,,Upcoming-sales mailing-list path on live site
+APL Casino Kyogle,email_mailing_list,https://www.aplcasino.net.au/livestock,AMBER,subscribe_now,alerts@your-domain.com,,,,Livestock-page mailing-list path
+Donovan Livestock & Property,email_mailing_list,https://donovanlivestock.com.au/contact/,AMBER,subscribe_now,alerts@your-domain.com,,,,Select Livestock Sales on signup/contact form
+Forbes Livestock & Agency Co,email_newsletter,https://forbeslivestock.com.au/,AMBER,subscribe_now,alerts@your-domain.com,,,,Homepage newsletter path to test
+Quality Livestock,email_subscribe,https://qualitylivestock.com.au/,AMBER,subscribe_now,alerts@your-domain.com,,,,Email Subscribe path on live site
+Ian Weir & Son,direct_notice_or_permission,https://ianweirandson.com.au/contact/,AMBER,contact_now,alerts@your-domain.com,,,,Northern Rivers direct-notice candidate
+APL Tenterfield,direct_notice_or_permission,https://www.apltenterfield.net.au/livestock-for-sale,AMBER,contact_now,alerts@your-domain.com,,,,Ask for livestock email updates or direct notices
+Farrell McCrohon,direct_pdf_or_notice,https://farrellmccrohon.com.au/contact/,AMBER,contact_now,alerts@your-domain.com,,,,Best known sale-entry PDF pattern
+McCormack Real Estate,direct_notice_or_permission,https://www.mccormackrealestate.com.au/livestock,AMBER,contact_now,alerts@your-domain.com,,,,Livestock page active but no clean self-serve signup confirmed

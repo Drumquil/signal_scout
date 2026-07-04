@@ -1,0 +1,61 @@
+{
+  "message_id": "source-2026-06-14-001",
+  "source_name": "Nutrien Ag Solutions",
+  "source_type": "email_notice",
+  "permission_status": "authorised_feed_only",
+  "source_confidence": 0.45,
+  "sender_email": "alerts@example.com",
+  "received_at": "2026-06-14T08:30:00+10:00",
+  "subject": "Upcoming livestock sales alert",
+  "body_text": "Paste or summarise factual notice text here.",
+  "source_url": "https://example.com/source-notice",
+  "catalogue_url": "https://example.com/catalogue.pdf",
+  "feed_meta": {
+    "feed_type": "manual_export_or_atom",
+    "feed_title": "Optional feed title or inbox label",
+    "entry_id": "Optional source feed entry id",
+    "entry_link": "https://example.com/source-notice",
+    "published_at": "2026-06-14T08:25:00+10:00",
+    "ktn_inbox_label": "Optional Kill the Newsletter inbox label"
+  },
+  "attachments": [
+    {
+      "file_name": "catalogue.pdf",
+      "path": "catalogues/catalogue.pdf"
+    }
+  ],
+  "records": [
+    {
+      "external_id": "lot-001",
+      "title": "54 Station Mated Cows",
+      "sale_name": "Northern Rivers Store Sale",
+      "sale_date": "2026-06-20",
+      "vendor": "Example Agency",
+      "location": "Casino, NSW",
+      "state": "NSW",
+      "class": "station mated",
+      "listing_type": "commercial",
+      "listing_category": "breeding_female",
+      "catalogue_pending": false,
+      "num_head": 54,
+      "num_calves": null,
+      "sex": null,
+      "breed": "Angus",
+      "breed_groups": [],
+      "avg_weight_kg": null,
+      "weight_min": null,
+      "weight_max": null,
+      "weight_range_kg": null,
+      "fat_score": null,
+      "age_min_months": null,
+      "age_max_months": null,
+      "is_EU": false,
+      "is_NE": false,
+      "is_LPA": false,
+      "is_MSA": false,
+      "has_WHP": false,
+      "HGP_free": null,
+      "notes_raw": "Optional extracted notes from the source notice."
+    }
+  ]
+}
