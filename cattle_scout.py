@@ -684,7 +684,8 @@ def detect_listing_type(url, soup, page_text):
       2. Head count: mob of >1 head → commercial signal
          Single head with no mob weight → stud signal
       3. EBV data present → stud signal
-      4. Individual animal name in slug (non-numeric start) → stud signal
+      4. Known stud sale slug with no mob head count → stud signal
+      5. Individual animal name in slug (non-numeric start) → stud signal
 
     Returns: "commercial", "stud", or "unknown"
     """
@@ -720,6 +721,9 @@ def detect_listing_type(url, soup, page_text):
         if head_count and head_count > 1:
             # Mob of animals — commercial saleyard dispersal
             return "commercial"
+        elif is_stud_sale_url(url) and not head_count:
+            # Some stud lots use numeric identifiers instead of a named slug
+            return "stud"
         elif is_individual_slug and not head_count:
             # Named individual with no head count — stud genetics
             return "stud"

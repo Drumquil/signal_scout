@@ -45,6 +45,11 @@ class CoreHelperTests(unittest.TestCase):
                 "stud",
             ),
             (
+                "https://auctionsplus.com.au/auctions/cattle/alc-brahmans-bull-sale/25-7977/listing/127584-1363429/browse",
+                "Individual animal profile",
+                "stud",
+            ),
+            (
                 "https://auctionsplus.com.au/auctions/cattle/sale/unknown-path/123",
                 "No decisive fields",
                 "commercial",
