@@ -45,8 +45,13 @@ class CoreHelperTests(unittest.TestCase):
                 "stud",
             ),
             (
+                "https://auctionsplus.com.au/auctions/cattle/pentire-angus-14th-annual-sale/benson/listing/128329-1370143/browse",
+                "1 Head",
+                "stud",
+            ),
+            (
                 "https://auctionsplus.com.au/auctions/cattle/alc-brahmans-bull-sale/25-7977/listing/127584-1363429/browse",
-                "Individual animal profile",
+                "1 Head",
                 "stud",
             ),
             (

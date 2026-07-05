@@ -682,7 +682,7 @@ def detect_listing_type(url, soup, page_text):
       1. URL path hint: /assessed/ or /described/ → strong commercial signal
          /listing/ → weak stud signal (also used by some commercial saleyard sales)
       2. Head count: mob of >1 head → commercial signal
-         Single head with no mob weight → stud signal
+         Single named or stud-sale head → stud signal
       3. EBV data present → stud signal
       4. Known stud sale slug with no mob head count → stud signal
       5. Individual animal name in slug (non-numeric start) → stud signal
@@ -721,6 +721,9 @@ def detect_listing_type(url, soup, page_text):
         if head_count and head_count > 1:
             # Mob of animals — commercial saleyard dispersal
             return "commercial"
+        elif head_count == 1 and (is_stud_sale_url(url) or is_individual_slug):
+            # Individual animal pages often show "1 Head"
+            return "stud"
         elif is_stud_sale_url(url) and not head_count:
             # Some stud lots use numeric identifiers instead of a named slug
             return "stud"

@@ -163,7 +163,19 @@ Notes:
 
 ## Tab 4: `cattle_model_output`
 
-Written by `cattle_model.py`. Read by `get_model_fair_value()`. Column B contains the most recent fair value estimate in c/kg lwt. Returns `None` if blank or unreadable.
+Written by the future `cattle_model.py` integration. Read by `get_model_fair_value()`.
+
+Expected minimum contract:
+
+| Col | Field name | Type | Notes |
+|---|---|---|---|
+| A | `timestamp` | str | Date-like value, e.g. `2026-07-05 09:00` |
+| B | `fair_value_c_kg` | float | Plausible current fair value in c/kg lwt, accepted range `100` to `2000` |
+
+The runtime scans from the bottom up and uses the newest row with a date-like
+timestamp and plausible numeric value. If the tab is blank, unreadable, or only
+contains implausible values, alerts still run with `fair_value_at_alert` blank
+and valuation flag `No valuation`.
 
 ---
 
