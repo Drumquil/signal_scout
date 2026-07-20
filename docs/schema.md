@@ -147,6 +147,12 @@ Notes:
   `target_sex`, `target_classes`, `include_commercial`,
   `include_breeding_females`, `breeding_female_classes`,
   `include_bulls`, and `include_cow_calf_units`.
+- Optional location-radius filtering uses:
+  `target_location_town` as a town name and `target_radius_km` as the search
+  radius in kilometres. The runtime rejects listings with known coordinates
+  outside the radius and passes unknown/unmapped locations through to avoid
+  silent false negatives during beta. This is the intended replacement for
+  picking individual sale venues one by one.
 - Female breeding semantics for v2.1:
   `breeding_female_classes = heifer` for joined/PTIC/NSM heifer lines,
   `breeding_female_classes = cow` for joined/PTIC/NSM cow lines,

@@ -54,6 +54,11 @@ from sheets_client import get_client
 
 load_dotenv()
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -574,6 +579,32 @@ def validate_transformed_config_rows(config_rows):
         raise ValueError("include_breeding_females is TRUE but no breeding_female_classes were written.")
 
 
+PRESERVE_ON_REPLACE_SETTINGS = {
+    "target_location_town",
+    "target_radius_km",
+}
+
+
+def preserve_existing_config_settings(config_ws, user_id, config_rows):
+    """
+    Carry forward operator-managed settings that the current Google Form does
+    not collect yet.
+    """
+    existing_settings = {row[1] for row in config_rows}
+    rows_to_preserve = []
+    for row in config_ws.get_all_values()[1:]:
+        if len(row) < 3:
+            continue
+        if row[0] != user_id:
+            continue
+        setting = row[1].strip()
+        value = row[2].strip()
+        if setting in PRESERVE_ON_REPLACE_SETTINGS and setting not in existing_settings and value:
+            rows_to_preserve.append([user_id, setting, value])
+
+    return [*config_rows, *rows_to_preserve]
+
+
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
@@ -642,6 +673,7 @@ def main():
     existing_user_rows = find_user_row_indices(config_ws, user_id)
     replace_existing = False
     if existing_user_rows:
+        config_rows = preserve_existing_config_settings(config_ws, user_id, config_rows)
         print(
             f"\nWARNING: user_id '{user_id}' already exists in cattle_scout_config "
             f"({len(existing_user_rows)} row(s))."
@@ -656,7 +688,7 @@ def main():
             replace_existing = True
 
     # Preview
-    action = "replace and append" if replace_existing else "append"
+    action = "replace and append" if (replace_existing or existing_user_rows) else "append"
     print(f"\nAbout to {action} {len(config_rows)} rows in '{CONFIG_TAB_NAME}':")
     if replace_existing:
         print(f"  Existing rows to delete first: {existing_user_rows}")

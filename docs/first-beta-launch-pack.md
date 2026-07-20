@@ -198,8 +198,39 @@ Do not switch live sending on until every item below is true.
 - tester submission has been previewed first with
   `python transform_form_response.py --row <n> --dry-run`
 - tester config rows look correct in Sheets
-- existing validation profiles remain active for comparison
+- only intended beta tester profiles are active; dummy/self-test profiles stay
+  inactive unless deliberately re-enabled for validation
 - no known trust-breaking bug is unresolved
+
+### Immediate Post-Form `TEST_MODE` Run
+
+Use this immediately after a tester submits the form, before waiting for the
+next scheduled GitHub Actions run:
+
+1. Preferred preview shortcut:
+   `python run_post_form_check.py --row <n>`
+2. Or preview the new response manually:
+   `python transform_form_response.py --row <n> --dry-run`
+3. If the preview matches the tester brief, write the config:
+   `python transform_form_response.py --row <n>`
+4. Preferred safe scrape shortcut after the config write:
+   `python run_post_form_check.py --row <n> --run-scout --target-user-id <user_id>`
+5. Or run one supervised local scrape in safe mode:
+
+```powershell
+$env:TEST_MODE = "TRUE"
+$env:MAX_PAGES = "5"
+$env:SCRAPE_WORKERS = "4"
+$env:REQUEST_DELAY = "1"
+$env:LISTING_CACHE_TTL_SECONDS = "10800"
+$env:TARGET_USER_ID = "<user_id>"
+python .\cattle_scout.py
+```
+
+If running from GitHub instead, use **Actions > Signal Scout > Run workflow**
+with `test_mode=TRUE`, `max_pages=5`, `scrape_workers=4`, and
+`request_delay=1`, then set `target_user_id` to the new tester's `user_id`.
+Treat `test_mode=FALSE` as a separate deliberate go-live decision.
 
 ### Operator readiness
 

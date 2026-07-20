@@ -43,6 +43,15 @@ STUD_SALE_SLUG_MARKERS = [
 
 **Important:** `/listing/` URLs are NOT reliably stud-only. The Mortlake store cattle sale (`wvlx-mortlake-may-21st-store-cattle-sale`) uses `/listing/` for commercial mob lots. URL path is a hint only — content classification takes precedence.
 
+**Beta runtime note (July 2026):** `listing_type="stud"` no longer means
+`listing_category="bull"`. Stud/genetics detail pages are parsed by stock type
+so female-sale lots can surface as `breeding_female` or `cow_calf_unit` and
+then pass through the normal buyer category, breed, head-count, and known-age
+gates.
+Unknown stud records stay unsupported rather than being silently treated as
+bulls. Sale slugs such as `bull-female-sale` are not category evidence by
+themselves; title and visible page text must carry the female or bull signal.
+
 ---
 
 ## Catalogue Release Timing

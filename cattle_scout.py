@@ -33,11 +33,14 @@ Version: 2.4 — July 2026
 """
 
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 import requests
 from bs4 import BeautifulSoup
@@ -57,6 +60,30 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
+def parse_int_runtime_value(raw_value, default, min_value=None, max_value=None):
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def parse_float_runtime_value(raw_value, default, min_value=None, max_value=None):
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
 
 # ─────────────────────────────────────────────
 # CREDENTIALS — loaded from .env (never hardcoded)
@@ -88,8 +115,25 @@ AUCTIONSPLUS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-MAX_PAGES     = 5
-REQUEST_DELAY = 3
+MAX_PAGES     = parse_int_runtime_value(os.getenv("MAX_PAGES", "5"), 5, min_value=1, max_value=20)
+REQUEST_DELAY = parse_float_runtime_value(os.getenv("REQUEST_DELAY", "3"), 3.0, min_value=0.1, max_value=30.0)
+SCRAPE_WORKERS = parse_int_runtime_value(os.getenv("SCRAPE_WORKERS", "1"), 1, min_value=1, max_value=8)
+LISTING_CACHE_TTL_SECONDS = parse_int_runtime_value(
+    os.getenv("LISTING_CACHE_TTL_SECONDS", "10800"),
+    10800,
+    min_value=0,
+    max_value=86400,
+)
+LISTING_CACHE_FILE = Path(os.getenv("LISTING_CACHE_FILE", ".runtime_cache/listing_detail_cache.json"))
+LISTING_CACHE_SCHEMA_VERSION = os.getenv("LISTING_CACHE_SCHEMA_VERSION", "2026-07-20-v2")
+LISTING_CACHE_PENDING_TTL_SECONDS = parse_int_runtime_value(
+    os.getenv("LISTING_CACHE_PENDING_TTL_SECONDS", "900"),
+    900,
+    min_value=0,
+    max_value=3600,
+)
+TARGET_USER_ID = os.getenv("TARGET_USER_ID", "").strip()
+FORCE_REFRESH = os.getenv("FORCE_REFRESH", "FALSE").strip().upper() in ("1", "TRUE", "YES", "Y")
 TEST_MODE     = os.getenv("TEST_MODE", "TRUE").strip().upper() in ("1", "TRUE", "YES", "Y")
 UNDERVALUED_THRESHOLD = 0.10
 OVERVALUED_THRESHOLD  = 0.10
@@ -268,6 +312,89 @@ def build_requests_session(headers=None):
     return session
 
 
+def load_listing_cache():
+    """Load the local listing-detail cache, ignoring corrupt cache files."""
+    if FORCE_REFRESH:
+        print("  Listing cache bypassed because FORCE_REFRESH=TRUE.")
+        return {}
+    if LISTING_CACHE_TTL_SECONDS <= 0 or not LISTING_CACHE_FILE.exists():
+        return {}
+    try:
+        with open(LISTING_CACHE_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return prune_listing_cache(payload)
+    except Exception as e:
+        print(f"  Warning: ignoring unreadable listing cache {LISTING_CACHE_FILE}: {e}")
+        return {}
+
+
+def save_listing_cache(cache):
+    """Persist the local listing-detail cache outside tracked source files."""
+    if LISTING_CACHE_TTL_SECONDS <= 0:
+        return
+    try:
+        cache = prune_listing_cache(cache)
+        LISTING_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = LISTING_CACHE_FILE.with_suffix(LISTING_CACHE_FILE.suffix + ".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, ensure_ascii=True)
+            handle.write("\n")
+        tmp_file.replace(LISTING_CACHE_FILE)
+    except Exception as e:
+        print(f"  Warning: could not write listing cache {LISTING_CACHE_FILE}: {e}")
+
+
+def cache_key_for_item(source_name, item):
+    return f"{LISTING_CACHE_SCHEMA_VERSION}:{source_name}:{item}"
+
+
+def prune_listing_cache(cache, now=None):
+    if not isinstance(cache, dict):
+        return {}
+    prefix = LISTING_CACHE_SCHEMA_VERSION + ":"
+    current_time = now if now is not None else time.time()
+    return {
+        key: entry
+        for key, entry in cache.items()
+        if isinstance(key, str)
+        and key.startswith(prefix)
+        and get_cached_listing(cache, key, now=current_time) is not None
+    }
+
+
+def get_cached_listing(cache, key, now=None):
+    if LISTING_CACHE_TTL_SECONDS <= 0:
+        return None
+    entry = cache.get(key)
+    if not isinstance(entry, dict):
+        return None
+    fetched_at = entry.get("fetched_at")
+    if not isinstance(fetched_at, (int, float)):
+        return None
+    current_time = now if now is not None else time.time()
+    ttl_seconds = entry.get("ttl_seconds", LISTING_CACHE_TTL_SECONDS)
+    if not isinstance(ttl_seconds, (int, float)):
+        ttl_seconds = LISTING_CACHE_TTL_SECONDS
+    ttl_seconds = min(ttl_seconds, LISTING_CACHE_TTL_SECONDS)
+    if current_time - fetched_at >= ttl_seconds:
+        return None
+    return entry.get("payload")
+
+
+def set_cached_listing(cache, key, payload):
+    if LISTING_CACHE_TTL_SECONDS <= 0 or payload is None:
+        return
+    payloads = payload if isinstance(payload, list) else [payload]
+    has_pending_catalogue = any(
+        isinstance(item, dict) and item.get("catalogue_pending")
+        for item in payloads
+    )
+    ttl_seconds = LISTING_CACHE_TTL_SECONDS
+    if has_pending_catalogue and LISTING_CACHE_PENDING_TTL_SECONDS > 0:
+        ttl_seconds = min(LISTING_CACHE_TTL_SECONDS, LISTING_CACHE_PENDING_TTL_SECONDS)
+    cache[key] = {"fetched_at": time.time(), "ttl_seconds": ttl_seconds, "payload": payload}
+
+
 def normalise_shared_listing(listing, source_def):
     """
     Fill in shared runtime defaults and attach source metadata.
@@ -357,6 +484,7 @@ def get_source_definitions():
             "discover_items": get_auctionsplus_listing_urls,
             "scrape_item": scrape_auctionsplus_listing,
             "session_factory": lambda: build_requests_session(AUCTIONSPLUS_HEADERS),
+            "cache_items": True,
             "permission_status": "permission_first_beta",
             "source_confidence": 0.9,
         },
@@ -411,6 +539,41 @@ BREEDING_FEMALE_QUALIFIERS = [
     "mated", "future breeder", "future breeders", "joining"
 ]
 
+KNOWN_BREEDS = [
+    "Angus", "Hereford", "Red Angus", "Brahman", "Droughtmaster",
+    "Santa Gertrudis", "Charolais", "Limousin", "Simmental", "Murray Grey",
+    "Shorthorn", "Wagyu", "Brangus", "Composite", "Fleckvieh", "Speckle Park",
+    "Belmont Red", "Senepol", "Ultrablack", "Poll Hereford", "Black Baldy",
+    "Piedmontese", "Charbray", "Simbrah",
+]
+
+AU_TOWN_COORDS = {
+    # Northern Rivers / North Coast focus for first beta profile.
+    "lismore": (-28.8135, 153.2773),
+    "casino": (-28.8647, 153.0471),
+    "grafton": (-29.6814, 152.9334),
+    "kyogle": (-28.6218, 153.0037),
+    "ballina": (-28.8688, 153.5658),
+    "alstonville": (-28.8419, 153.4405),
+    "maclean": (-29.4586, 153.1966),
+    "yamba": (-29.4370, 153.3592),
+    "tenterfield": (-29.0557, 152.0182),
+    "glen innes": (-29.7341, 151.7385),
+    "coffs harbour": (-30.2963, 153.1135),
+    "bellingen": (-30.4520, 152.8992),
+    "kempsey": (-31.0784, 152.8306),
+    "armidale": (-30.5145, 151.6656),
+    "inverell": (-29.7760, 151.1120),
+    # Common NSW/nearby places seen in AuctionsPlus output and fixtures.
+    "cowra": (-33.8355, 148.6966),
+    "braidwood": (-35.4415, 149.7999),
+    "dubbo": (-32.2569, 148.6011),
+    "tamworth": (-31.0927, 150.9320),
+    "wagga wagga": (-35.1082, 147.3598),
+    "toowoomba": (-27.5598, 151.9507),
+    "warwick": (-28.2190, 152.0344),
+}
+
 
 def contains_phrase(text, phrase, allow_plural=False):
     """
@@ -427,6 +590,68 @@ def contains_phrase(text, phrase, allow_plural=False):
             escaped = f"{escaped}s?"
     pattern = rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
     return re.search(pattern, text) is not None
+
+
+def haversine_km(coord_a, coord_b):
+    lat1, lon1 = coord_a
+    lat2, lon2 = coord_b
+    radius_km = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def normalise_town_name(value):
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def town_coords(town):
+    return AU_TOWN_COORDS.get(normalise_town_name(town))
+
+
+def infer_location_town(location):
+    location_text = normalise_town_name(location)
+    if not location_text or "unknown" in location_text:
+        return None
+
+    first_part = normalise_town_name(re.split(r"[,;]", location_text, maxsplit=1)[0])
+    if first_part in AU_TOWN_COORDS:
+        return first_part
+
+    for town in sorted(AU_TOWN_COORDS, key=len, reverse=True):
+        if re.search(r"(?<![a-z0-9])" + re.escape(town) + r"(?![a-z0-9])", location_text):
+            return town
+    return None
+
+
+def location_within_target_radius(listing, config):
+    target_town = config.get("target_location_town")
+    target_radius = config.get("target_radius_km")
+    if not target_town or not target_radius:
+        return True, None
+
+    target_coord = town_coords(target_town)
+    if not target_coord:
+        return True, f"target town {target_town!r} has no coordinate"
+
+    listing_town = infer_location_town(listing.get("location"))
+    if not listing_town:
+        return True, "listing location has no known town coordinate"
+
+    listing_coord = town_coords(listing_town)
+    distance_km = haversine_km(target_coord, listing_coord)
+    if distance_km > target_radius:
+        return False, (
+            f"location={listing_town!r} {distance_km:.0f}km from "
+            f"{normalise_town_name(target_town)!r} > radius={target_radius:g}km"
+        )
+    return True, None
 
 
 # ─────────────────────────────────────────────
@@ -482,7 +707,8 @@ def load_config(worksheet_config):
         "bull_EBV_400DW_min", "bull_EBV_600DW_min", "bull_EBV_MILK_min",
         "bull_EBV_DTC_max", "bull_EBV_DOC_min", "bull_EBV_CWT_min",
         "bull_EBV_EMA_min", "bull_EBV_MARB_min", "bull_EBV_RIB_min",
-        "bull_EBV_SS_min", "bull_EBV_SRI_min", "bull_EBV_beef_value_min"
+        "bull_EBV_SS_min", "bull_EBV_SRI_min", "bull_EBV_beef_value_min",
+        "target_radius_km",
     }
 
     # Build a dict-of-dicts keyed by user_id while reading rows.
@@ -1264,14 +1490,6 @@ def scrape_commercial_listing(url, soup, page_text):
     # For mixed mobs there are multiple head/sire/dam groups in sequence.
     # Previous parser used field-id="Breed" selector — this attribute does not
     # exist in the static HTML. The data is in plain text lines only.
-    KNOWN_BREEDS = [
-        "Angus", "Hereford", "Red Angus", "Brahman", "Droughtmaster",
-        "Santa Gertrudis", "Charolais", "Limousin", "Simmental", "Murray Grey",
-        "Shorthorn", "Wagyu", "Brangus", "Composite", "Fleckvieh", "Speckle Park",
-        "Belmont Red", "Senepol", "Ultrablack", "Poll Hereford", "Black Baldy",
-        "Piedmontese", "Charbray", "Simbrah",
-    ]
-
     detected_breed = "Unknown"
     breed_groups = []  # list of (head_count, sire_breed, dam_breed)
 
@@ -1585,6 +1803,117 @@ def scrape_commercial_listing(url, soup, page_text):
 # STEP 5B — STUD/GENETICS PARSER
 # ─────────────────────────────────────────────
 
+def infer_known_breed(*texts):
+    """Return the first known breed found in the supplied text fragments."""
+    for text in texts:
+        if not text:
+            continue
+        for breed in sorted(KNOWN_BREEDS, key=len, reverse=True):
+            if re.search(r"\b" + re.escape(breed) + r"\b", text, re.IGNORECASE):
+                return breed
+    return "Unknown"
+
+
+def infer_female_class_from_text(text):
+    text = (text or "").lower()
+    if re.search(r"\bcaf\b", text) or re.search(r"\bcows?\s*(?:&|and|/)\s*cal(?:f|ves)\b", text):
+        return "cow_calf_unit", "cow-and-calf"
+    if re.search(r"\bcalf\s+at\s+foot\b|\bcalves\s+at\s+foot\b", text):
+        return "cow_calf_unit", "cow-and-calf"
+    has_heifer = re.search(r"\bheifers?\b", text)
+    has_cow = re.search(r"\bcows?\b", text)
+    has_calved = re.search(r"\bcalved\b", text)
+    if has_heifer and not has_cow and not has_calved:
+        return "breeding_female", "heifer"
+    if has_cow or has_calved or re.search(r"\bdonor\b", text):
+        return "breeding_female", "cow"
+    return "breeding_female", "female"
+
+
+def stud_animal_inference_text(title, page_text):
+    animal_lines = []
+    for line in (page_text or "").splitlines():
+        line_lower = line.lower()
+        if " sale" in line_lower or "sale " in line_lower:
+            continue
+        animal_lines.append(line)
+    return f"{title or ''} {' '.join(animal_lines)}"
+
+
+def infer_stud_line_category(page_text):
+    for raw_line in (page_text or "").splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip().lower()
+        if not line:
+            continue
+        if re.fullmatch(r"(sex|gender)?\s*:?\s*(male|bull)", line):
+            return "bull", "bull"
+        if re.fullmatch(r"(sex|gender)?\s*:?\s*female", line):
+            return "breeding_female", "female"
+        if re.fullmatch(r"(class|category)?\s*:?\s*cow\s*(?:&|and|/)\s*cal(?:f|ves)", line):
+            return "cow_calf_unit", "cow-and-calf"
+        if re.fullmatch(r"(class|category)?\s*:?\s*caf", line):
+            return "cow_calf_unit", "cow-and-calf"
+        if re.fullmatch(r"(class|category)?\s*:?\s*heifer", line):
+            return "breeding_female", "heifer"
+        if re.fullmatch(r"(class|category)?\s*:?\s*cow", line):
+            return "breeding_female", "cow"
+    return None
+
+
+def infer_stud_female_category(url, title, page_text, sex_text=None, class_text=None):
+    """
+    Classify stud/genetics listings beyond the old bull-only fallback.
+
+    Stud sale pages often expose individual females on `/listing/` URLs, so a
+    buyer looking for breeding females should not have every stud listing
+    rejected as `bull` before normal buyer filters run.
+    """
+    title_text = (title or "").lower()
+    explicit_text = f"{sex_text or ''} {class_text or ''}".lower()
+
+    if re.search(r"\b(male|bull|bulls|semen)\b", explicit_text):
+        return "bull", "bull"
+
+    if re.search(r"\b(female|cow|heifer|ptic|joined|nsm|pregnant|calved)\b", explicit_text):
+        return infer_female_class_from_text(explicit_text)
+
+    if re.search(r"\bbulls?\b|\bsemen\b|\bmale\b", title_text):
+        return "bull", "bull"
+
+    line_category = infer_stud_line_category(page_text)
+    if line_category:
+        return line_category
+
+    visible_text = stud_animal_inference_text(title, page_text).lower()
+    visible_text = re.sub(r"\bcows?\s*[- ]\s*famil(?:y|ies)\b", " ", visible_text)
+
+    if re.search(r"\bcaf\b", visible_text) or re.search(r"\bcows?\s*(?:&|and|/)\s*cal(?:f|ves)\b", visible_text):
+        return "cow_calf_unit", "cow-and-calf"
+    if re.search(r"\bcalf\s+at\s+foot\b|\bcalves\s+at\s+foot\b", visible_text):
+        return "cow_calf_unit", "cow-and-calf"
+
+    female_patterns = (
+        r"\bfemales?\b", r"\bheifers?\b", r"\bcows?\b", r"\bdonor\b",
+        r"\bptic\b", r"\bjoined\b", r"\bnsm\b", r"\bstation mated\b",
+        r"\bpregnant\b", r"\bpregnancy\b", r"\bcalved\b",
+    )
+    male_signals = (r"\bbulls?\b", r"\bsemen\b", r"\bmale\b")
+
+    female_hit = any(re.search(pattern, visible_text) for pattern in female_patterns)
+    male_hit = any(re.search(signal, visible_text) for signal in male_signals)
+
+    if female_hit and male_hit:
+        return "stud", "unknown"
+
+    if female_hit:
+        return infer_female_class_from_text(visible_text)
+
+    if male_hit:
+        return "bull", "bull"
+
+    return "stud", "unknown"
+
+
 def scrape_stud_listing(url, soup, page_text):
     """
     Parses a stud/genetics individual animal listing (/listing/).
@@ -1592,7 +1921,14 @@ def scrape_stud_listing(url, soup, page_text):
     """
     # Title — same div pattern as commercial listings
     title_div = soup.find("div", class_=lambda c: c and "text-headline-sm" in c and "font-medium" in c)
-    title = title_div.get_text(strip=True) if title_div else "Unknown"
+    title = title_div.get_text(strip=True) if title_div else None
+    if not title:
+        page_title_tag = soup.find("title")
+        if page_title_tag:
+            title = page_title_tag.get_text(strip=True).split("|")[0].strip()
+    if not title:
+        slug_match = re.search(r"/cattle/[^/]+/([^/]+)/(?:listing|assessed|described)/", url)
+        title = slug_match.group(1).replace("-", " ").title() if slug_match else "Unknown"
 
     # Location — use get_field_text() to handle both Vue attribute and static HTML patterns
     location = get_field_text(soup, "Location")
@@ -1628,26 +1964,69 @@ def scrape_stud_listing(url, soup, page_text):
                 state = abbrev
                 break
 
+    sex_text = get_field_text(soup, "Sex")
+    class_text = get_field_text(soup, "Class")
+    breed_text = get_field_text(soup, "Breed")
+
+    listing_category, detected_class = infer_stud_female_category(
+        url,
+        title,
+        page_text,
+        sex_text=sex_text,
+        class_text=class_text,
+    )
+    detected_breed = infer_known_breed(breed_text) if breed_text else infer_known_breed(
+        title,
+        stud_animal_inference_text("", page_text),
+    )
+    horn_status = "polled" if re.search(r"\bpolled\b|\(p\)", page_text, re.IGNORECASE) else None
+    head_match = re.search(r"(\d+)\s+Head\b", page_text, re.IGNORECASE)
+    num_head = int(head_match.group(1)) if head_match else 1
+
+    if listing_category == "bull":
+        detected_sex = "bull"
+    elif detected_class == "heifer":
+        detected_sex = "heifer"
+    elif detected_class in ("cow", "cow-and-calf"):
+        detected_sex = "cow"
+    else:
+        detected_sex = None
+
+    sale_name = "Stud Sale"
+    for a in soup.find_all("a", href=True):
+        if "auction-results/cattle/" in a.get("href", ""):
+            sale_name = a.get_text(strip=True)
+            break
+
+    sale_date_match = re.search(
+        r"((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+\w+\s+\d{4})",
+        page_text,
+    )
+    sale_date = re.sub(r"\s+", " ", sale_date_match.group(1)).strip() if sale_date_match else "Unknown"
+
     return {
         "listing_type":      "stud",
-        "listing_category":  "bull",
+        "listing_category":  listing_category,
         "url":               url,
         "title":             title,
-        "sale_name":         "Stud Sale",
-        "sale_date":         "Unknown",
+        "sale_name":         sale_name,
+        "sale_date":         sale_date,
         "catalogue_pending": False,
         "vendor":            "Unknown",
         "pre_auction_text":  "",
-        "num_head":          1,
+        "num_head":          num_head,
         "num_calves":        None,
         "state":             state,
         "location":          location,
-        "class":             "bull",
+        "class":             detected_class,
+        "sex":               detected_sex,
         "avg_weight_kg":     None,
         "weight_min":        None,
         "weight_max":        None,
         "weight_range_kg":   None,
-        "breed":             "Unknown",
+        "breed":             detected_breed,
+        "breed_groups":      [],
+        "horn_status":       horn_status,
         "fat_score":         None,
         "age_min_months":    None,
         "age_max_months":    None,
@@ -1883,6 +2262,8 @@ def collect_source_listings(source_defs):
     Returns one shared normalised listing list for downstream per-user matching.
     """
     shared_listings = []
+    listing_cache = load_listing_cache()
+    cache_changed = False
 
     for source_def in source_defs:
         print(f"\nCollecting source: {source_def['name']}")
@@ -1892,12 +2273,67 @@ def collect_source_listings(source_defs):
         discovered = len(items)
         scraped = 0
         skipped = 0
+        cache_hits = 0
         seen_urls = set()
+        source_uses_cache = bool(source_def.get("cache_items"))
+        source_request_delay = REQUEST_DELAY
+        fetch_lock = Lock()
+        cache_lock = Lock()
+        next_fetch_at = [0.0]
 
-        for item in items:
-            listing = source_def["scrape_item"](item, session=session)
-            if session:
-                time.sleep(REQUEST_DELAY)
+        def wait_for_fetch_slot():
+            if source_request_delay <= 0:
+                return
+            with fetch_lock:
+                now = time.monotonic()
+                wait_seconds = max(0.0, next_fetch_at[0] - now)
+                next_fetch_at[0] = max(now, next_fetch_at[0]) + source_request_delay
+            if wait_seconds:
+                time.sleep(wait_seconds)
+
+        def scrape_one(item):
+            nonlocal cache_changed
+            cache_key = cache_key_for_item(source_def["name"], item) if source_uses_cache else None
+            if cache_key:
+                with cache_lock:
+                    cached = get_cached_listing(listing_cache, cache_key)
+                if cached is not None:
+                    return item, cached, True
+
+            # Requests sessions are not shared across worker threads.
+            item_session = (
+                source_def["session_factory"]()
+                if source_def.get("session_factory") and SCRAPE_WORKERS > 1
+                else session
+            )
+            if source_def.get("session_factory"):
+                wait_for_fetch_slot()
+            listing_payload = source_def["scrape_item"](item, session=item_session)
+            if cache_key and listing_payload is not None:
+                with cache_lock:
+                    set_cached_listing(listing_cache, cache_key, listing_payload)
+                    cache_changed = True
+            return item, listing_payload, False
+
+        scrape_results = []
+        can_parallel_scrape = bool(source_def.get("session_factory")) and SCRAPE_WORKERS > 1 and len(items) > 1
+        if can_parallel_scrape:
+            print(f"  Detail scrape workers: {SCRAPE_WORKERS}")
+            with ThreadPoolExecutor(max_workers=SCRAPE_WORKERS) as executor:
+                future_to_item = {executor.submit(scrape_one, item): item for item in items}
+                for future in as_completed(future_to_item):
+                    try:
+                        scrape_results.append(future.result())
+                    except Exception as e:
+                        print(f"  Warning: scrape worker failed for {future_to_item[future]}: {e}")
+                        scrape_results.append((future_to_item[future], None, False))
+        else:
+            for item in items:
+                scrape_results.append(scrape_one(item))
+
+        for item, listing, from_cache in scrape_results:
+            if from_cache:
+                cache_hits += 1
             if not listing:
                 skipped += 1
                 continue
@@ -1925,11 +2361,24 @@ def collect_source_listings(source_defs):
 
         print(
             f"  Source summary [{source_def['name']}]: "
-            f"discovered={discovered}, scraped={scraped}, skipped={skipped}"
+            f"discovered={discovered}, scraped={scraped}, skipped={skipped}, cache_hits={cache_hits}"
         )
+
+    if cache_changed:
+        save_listing_cache(listing_cache)
 
     print(f"\nShared listings scraped this run: {len(shared_listings)}")
     return shared_listings
+
+
+def filter_target_users(all_users, target_user_id):
+    target_user_id = (target_user_id or "").strip()
+    if not target_user_id:
+        return all_users
+    selected_users = [cfg for cfg in all_users if cfg.get("user_id") == target_user_id]
+    if not selected_users:
+        raise RuntimeError(f"TARGET_USER_ID={target_user_id!r} did not match any active user config.")
+    return selected_users
 
 
 def breeding_female_type_matches(listing, config):
@@ -1942,6 +2391,17 @@ def breeding_female_type_matches(listing, config):
     allowed_types = [t.lower() for t in config.get("breeding_female_classes", []) if t]
     if not allowed_types:
         return True
+
+    listing_class = (listing.get("class") or "").lower()
+    if "cow-and-calf" in listing_class or "cow" in listing_class:
+        female_type = "cow"
+    elif "heifer" in listing_class:
+        female_type = "heifer"
+    else:
+        female_type = None
+
+    if female_type:
+        return female_type in allowed_types
 
     title_lower = listing.get("title", "").lower()
     pre_lower = listing.get("pre_auction_text", "").lower()
@@ -1982,8 +2442,8 @@ def listing_match(listing, config):
 
     Price ceiling not applied pre-auction — prices only available post-sale.
     """
-    if listing["listing_type"] != "commercial":
-        return False, "listing_type not commercial"
+    if listing["listing_type"] not in ("commercial", "stud"):
+        return False, f"unsupported listing_type={listing['listing_type']!r}"
 
     if not config.get("active", True):
         return False, "config inactive"
@@ -2004,11 +2464,17 @@ def listing_match(listing, config):
     elif category == "commercial":
         if not config.get("include_commercial", True):
             return False, "commercial disabled"
+    elif category == "stud":
+        return False, "stud category unsupported"
 
     # ── State filter ──
     target_states = [s.upper() for s in config.get("target_states", [])]
     if target_states and listing["state"] != "Unknown" and listing["state"] not in target_states:
         return False, f"state={listing['state']} not in {target_states}"
+
+    within_radius, radius_reason = location_within_target_radius(listing, config)
+    if not within_radius:
+        return False, radius_reason
 
     # ── Class filter — commercial only ──
     listing_class = (listing.get("class") or "").lower()
@@ -2022,7 +2488,7 @@ def listing_match(listing, config):
     # If the parser could not determine sex (detected_sex is None), pass through —
     # silent misses are worse than false positives for a buy-side alert tool.
     target_sex = config.get("target_sex", "").lower().strip()
-    if target_sex and target_sex != "either":
+    if category == "commercial" and target_sex and target_sex != "either":
         detected_sex = listing.get("sex")
         if detected_sex is not None and detected_sex != target_sex:
             return False, f"sex={detected_sex!r} != target_sex={target_sex!r}"
@@ -2074,7 +2540,7 @@ def listing_match(listing, config):
             return False, f"weight_range={listing['weight_range_kg']}kg > max={max_range}kg"
 
     # ── Breed — soft gate, only if parser returned a known breed ──
-    if category in ("commercial", "bull"):
+    if category in ("commercial", "breeding_female", "cow_calf_unit", "bull"):
         if listing["breed"] != "Unknown":
             target_breeds = config.get("target_breeds", [])
             if target_breeds and listing["breed"].lower() not in target_breeds:
@@ -2594,6 +3060,11 @@ def main():
     # Load all active user configs from the Sheet.
     # Returns a list of dicts — one per active user with a valid twilio_to.
     all_users = load_config(worksheet_config)
+
+    if TARGET_USER_ID:
+        before_count = len(all_users)
+        all_users = filter_target_users(all_users, TARGET_USER_ID)
+        print(f"TARGET_USER_ID={TARGET_USER_ID!r}: selected {len(all_users)} of {before_count} active user(s).")
 
     if not all_users:
         print("No active users found in config — exiting.")

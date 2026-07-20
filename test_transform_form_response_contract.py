@@ -6,6 +6,7 @@ from transform_form_response import (
     build_response_row_dict,
     delete_user_rows,
     find_user_row_indices,
+    preserve_existing_config_settings,
     transform_response,
     validate_transformed_config_rows,
 )
@@ -128,6 +129,29 @@ class TransformFormResponseContractTests(unittest.TestCase):
             ["user_id", "setting", "value"],
             ["other_user", "active", "TRUE"],
         ])
+
+    def test_replace_preserves_operator_location_radius_settings(self):
+        config_rows = [
+            ["beta_tester", "active", "TRUE"],
+            ["beta_tester", "twilio_to", "whatsapp:+61400000000"],
+        ]
+        worksheet = FakeWorksheet([
+            ["user_id", "setting", "value"],
+            ["beta_tester", "active", "TRUE"],
+            ["beta_tester", "target_location_town", "Lismore"],
+            ["beta_tester", "target_radius_km", "130"],
+            ["other_user", "target_location_town", "Casino"],
+        ])
+
+        self.assertEqual(
+            preserve_existing_config_settings(worksheet, "beta_tester", config_rows),
+            [
+                ["beta_tester", "active", "TRUE"],
+                ["beta_tester", "twilio_to", "whatsapp:+61400000000"],
+                ["beta_tester", "target_location_town", "Lismore"],
+                ["beta_tester", "target_radius_km", "130"],
+            ],
+        )
 
     def test_commercial_only_profile_writes_commercial_gate(self):
         config = transform_to_runtime_config(

@@ -1,0 +1,11 @@
+source_name,channel_type,signup_or_source_url,legal_posture,permission_status,mailbox_used,subscription_date,last_notice_received_at,unsubscribed,notes
+Nutrien Ag Solutions,email_alert,https://www.nutrienagsolutions.com.au/livestock/sales-calendar,GREEN,subscribed,confirm mailbox,2026-07-19,,FALSE,Registered to Nutrien livestock/sales pages; waiting for first real alert email
+Donovan Livestock & Property,email_mailing_list,https://donovanlivestock.com.au/mailing-list/,AMBER,subscribed,confirm mailbox,2026-07-19,,FALSE,Registered to Donovan mailing list; waiting for first real livestock sales email
+Ramsey & Bulmer,email_mailing_list,https://www.ramseybulmer.com.au/upcoming-sales/livestock-sales/,AMBER,subscribed,confirm mailbox,2026-07-19,,FALSE,Registered to Ramsey & Bulmer livestock sales updates; waiting for first real notice
+APL Casino Kyogle,email_mailing_list,https://www.aplcasino.net.au/livestock/,AMBER,subscribed,confirm mailbox,2026-07-19,,FALSE,Registered to APL Casino livestock page updates; waiting for first real notice
+Forbes Livestock & Agency Co,email_newsletter,https://forbeslivestock.com.au/,AMBER,subscribe_next,confirm mailbox,,,,Homepage newsletter path remains a next candidate
+Quality Livestock,email_subscribe,https://qualitylivestock.com.au/,AMBER,subscribe_next,confirm mailbox,,,,Email Subscribe path remains a next candidate
+Ian Weir & Son,direct_notice_or_permission,https://ianweirandson.com.au/contact/,AMBER,contact_next,confirm mailbox,,,,Northern Rivers direct-notice candidate
+APL Tenterfield,direct_notice_or_permission,https://www.apltenterfield.net.au/livestock-for-sale,AMBER,contact_next,confirm mailbox,,,,Ask for livestock email updates or direct notices
+Farrell McCrohon,direct_pdf_or_notice,https://farrellmccrohon.com.au/contact/,AMBER,contact_next,confirm mailbox,,,,Best known sale-entry PDF pattern
+McCormack Real Estate,direct_notice_or_permission,https://www.mccormackrealestate.com.au/livestock,AMBER,contact_next,confirm mailbox,,,,Livestock page active but no clean self-serve signup confirmed

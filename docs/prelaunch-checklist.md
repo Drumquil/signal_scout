@@ -55,7 +55,7 @@ gate without explicit sign-off recorded here.
 
 | # | Item | Gate | Status | Notes |
 |---|---|---|---|---|
-| T1 | GitHub Actions cron confirmed firing on schedule | BETA GATE | Done | Both 7am and 1pm AEST runs confirmed. ~3hr scheduling variance on free tier is normal - not a bug. Closed Chat 13. |
+| T1 | GitHub Actions cron confirmed firing on schedule | BETA GATE | Done | Baseline 7am and 1pm AEST runs confirmed. On 20 July 2026, beta cadence was expanded with additional Thu/Fri/Sat daylight checks, non-overlap concurrency, timeout control, restored runtime cache, and workflow-dispatch inputs for post-form runs. ~3hr scheduling variance on free tier is normal - not a bug. |
 | T2 | Stage 2 ALERT path validated on live catalogue in v2.4 | BETA GATE | Done | Validated 29 May 2026 local run (post-catalogue): Stage 2 full criteria gates executed and alerts produced. Controlled WhatsApp send also delivered (single selected alert). |
 | T3 | `TEST_MODE=FALSE` set for the first intentional live tester window | BETA GATE | Open | Do not switch early. `TEST_MODE` now defaults safe/true unless the runtime environment overrides it. Use `docs/first-beta-launch-pack.md` and set the environment value only when the first tester is onboarded, reachable, and being supervised live. |
 | T4 | Breed detection failures diagnosed on live catalogue | BETA GATE | Done | Breed extraction risk is now non-blocking: Stage 2 treats `breed="Unknown"` as a pass-through (soft gate) to prevent silent false negatives. Track Unknown rate as a quality metric. |

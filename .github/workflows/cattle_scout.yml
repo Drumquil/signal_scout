@@ -1,14 +1,69 @@
 name: Signal Scout
 
+concurrency:
+  group: signal-scout-runtime
+  cancel-in-progress: false
+
 on:
   schedule:
-    - cron: '0 21 * * *'   # 7am AEST (UTC+10) — GitHub cron runs in UTC
+    - cron: '0 21 * * *'   # 7am AEST (UTC+10)
     - cron: '0 3 * * *'    # 1pm AEST (UTC+10)
-  workflow_dispatch:         # allows manual trigger from GitHub UI
+    - cron: '0 0,6,9 * * 4,5,6' # 10am, 4pm, 7pm AEST Thu/Fri/Sat sale-heavy checks
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE override for this run"
+        required: true
+        default: "TRUE"
+        type: choice
+        options:
+          - "TRUE"
+          - "FALSE"
+      max_pages:
+        description: "AuctionsPlus result pages to scan"
+        required: false
+        default: "5"
+        type: choice
+        options:
+          - "3"
+          - "5"
+          - "8"
+      scrape_workers:
+        description: "Concurrent detail scrape workers"
+        required: false
+        default: "4"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "4"
+          - "8"
+      request_delay:
+        description: "Seconds between detail request starts per source"
+        required: false
+        default: "1"
+        type: choice
+        options:
+          - "0.5"
+          - "1"
+          - "2"
+      target_user_id:
+        description: "Optional single user_id to evaluate"
+        required: false
+        default: ""
+      force_refresh:
+        description: "Bypass restored listing detail cache"
+        required: true
+        default: "FALSE"
+        type: choice
+        options:
+          - "FALSE"
+          - "TRUE"
 
 jobs:
   run-scout:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repo
@@ -21,6 +76,14 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Restore runtime cache
+        uses: actions/cache@v4
+        with:
+          path: .runtime_cache
+          key: signal-scout-runtime-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            signal-scout-runtime-cache-${{ runner.os }}-
 
       - name: Run offline unit tests
         run: python -m unittest discover -p "test_*.py"
@@ -37,4 +100,16 @@ jobs:
           TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
           GOOGLE_SHEETS_CREDS_FILE: google_credentials.json
           TWILIO_WHATSAPP_MODE: ${{ secrets.TWILIO_WHATSAPP_MODE }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || vars.TEST_MODE || 'TRUE' }}
+          MAX_PAGES: ${{ github.event.inputs.max_pages || vars.MAX_PAGES || '5' }}
+          SCRAPE_WORKERS: ${{ github.event.inputs.scrape_workers || vars.SCRAPE_WORKERS || '4' }}
+          REQUEST_DELAY: ${{ github.event.inputs.request_delay || vars.REQUEST_DELAY || '1' }}
+          LISTING_CACHE_TTL_SECONDS: ${{ vars.LISTING_CACHE_TTL_SECONDS || '10800' }}
+          LISTING_CACHE_PENDING_TTL_SECONDS: ${{ vars.LISTING_CACHE_PENDING_TTL_SECONDS || '900' }}
+          LISTING_CACHE_FILE: .runtime_cache/listing_detail_cache.json
+          TARGET_USER_ID: ${{ github.event.inputs.target_user_id || '' }}
+          FORCE_REFRESH: ${{ github.event.inputs.force_refresh || 'FALSE' }}
+          ENABLE_STOCKPLACE_SOURCE: "FALSE"
+          ENABLE_RMA_SOURCE: "FALSE"
+          ENABLE_AUTHORIZED_NOTICE_SOURCE: "FALSE"
         run: python cattle_scout.py

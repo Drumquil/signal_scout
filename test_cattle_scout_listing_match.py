@@ -87,6 +87,31 @@ class CommercialListingMatchTests(unittest.TestCase):
                     (False, reason),
                 )
 
+    def test_commercial_profile_rejects_known_location_outside_radius(self):
+        config = make_config({
+            "target_states": ["NSW"],
+            "target_location_town": "Lismore",
+            "target_radius_km": 130,
+        })
+
+        matched, reason = listing_match(make_listing({"location": "COWRA, Central West NSW"}), config)
+
+        self.assertFalse(matched)
+        self.assertIn("location='cowra'", reason)
+        self.assertIn("radius=130", reason)
+
+    def test_commercial_profile_allows_known_location_inside_radius(self):
+        config = make_config({
+            "target_states": ["NSW"],
+            "target_location_town": "Lismore",
+            "target_radius_km": 130,
+        })
+
+        self.assertEqual(
+            listing_match(make_listing({"location": "GRAFTON, Northern Rivers NSW"}), config),
+            (True, "match"),
+        )
+
     def test_commercial_profile_rejects_soft_gates_when_known(self):
         cases = [
             ({"avg_weight_kg": 240.0}, "weight=240.0kg < min=250kg"),
@@ -134,6 +159,158 @@ class CommercialListingMatchTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 config = make_config({"min_lifetime_traceable_pct": 80})
                 self.assertEqual(listing_match(make_listing(listing_overrides), config), (False, reason))
+
+    def test_breeding_female_profile_matches_stud_female_listing(self):
+        config = make_config({
+            "include_commercial": False,
+            "include_breeding_females": True,
+            "breeding_female_classes": ["cow"],
+            "target_classes": [],
+            "target_sex": "",
+            "sale_types": [],
+            "target_breeds": ["brangus", "brangus cross"],
+            "min_head": 1,
+            "max_head": 30,
+            "age_min_months": 36,
+            "age_max_months": 72,
+            "require_EU": False,
+            "require_NE": False,
+            "exclude_WHP": False,
+            "require_HGP_free": False,
+            "require_polled": True,
+            "require_quiet": False,
+        })
+        listing = make_listing({
+            "listing_type": "stud",
+            "listing_category": "breeding_female",
+            "title": "PROMISED LAND PRUE V47 Brangus Cow",
+            "class": "cow",
+            "sex": None,
+            "num_head": 1,
+            "sale_name": "The Grafton Angus Brangus Bull Female Sale",
+            "breed": "Brangus",
+            "age_min_months": None,
+            "age_max_months": None,
+            "horn_status": "polled",
+        })
+
+        self.assertEqual(listing_match(listing, config), (True, "match"))
+
+    def test_breeding_female_profile_rejects_wrong_known_breed(self):
+        config = make_config({
+            "include_commercial": False,
+            "include_breeding_females": True,
+            "breeding_female_classes": ["cow"],
+            "target_classes": [],
+            "target_sex": "",
+            "sale_types": [],
+            "target_breeds": ["brangus"],
+            "require_EU": False,
+            "require_NE": False,
+            "exclude_WHP": False,
+            "require_HGP_free": False,
+            "require_polled": False,
+            "require_quiet": False,
+        })
+        listing = make_listing({
+            "listing_category": "breeding_female",
+            "title": "12 PTIC Angus Cows",
+            "class": "cow",
+            "breed": "Angus",
+        })
+
+        self.assertEqual(
+            listing_match(listing, config),
+            (False, "breed='Angus' not in target_breeds"),
+        )
+
+    def test_breeding_female_profile_rejects_known_wrong_female_type(self):
+        config = make_config({
+            "include_commercial": False,
+            "include_breeding_females": True,
+            "breeding_female_classes": ["cow"],
+            "target_classes": [],
+            "target_sex": "",
+            "sale_types": [],
+            "target_breeds": ["brangus"],
+            "require_EU": False,
+            "require_NE": False,
+            "exclude_WHP": False,
+            "require_HGP_free": False,
+            "require_polled": False,
+            "require_quiet": False,
+        })
+        listing = make_listing({
+            "listing_type": "stud",
+            "listing_category": "breeding_female",
+            "title": "PROMISED LAND V49",
+            "class": "heifer",
+            "sex": "heifer",
+            "num_head": 1,
+            "breed": "Brangus",
+        })
+
+        self.assertEqual(listing_match(listing, config), (False, "breeding_female type mismatch"))
+
+    def test_commercial_target_sex_does_not_reject_breeding_female_category(self):
+        config = make_config({
+            "include_commercial": True,
+            "include_breeding_females": True,
+            "breeding_female_classes": ["cow"],
+            "target_classes": ["yearling"],
+            "target_sex": "heifer",
+            "sale_types": [],
+            "target_breeds": ["brangus"],
+            "min_head": 1,
+            "max_head": 30,
+            "require_EU": False,
+            "require_NE": False,
+            "exclude_WHP": False,
+            "require_HGP_free": False,
+            "require_polled": False,
+            "require_quiet": False,
+        })
+        listing = make_listing({
+            "listing_type": "stud",
+            "listing_category": "breeding_female",
+            "title": "PROMISED LAND PRUE V47",
+            "class": "cow",
+            "sex": "cow",
+            "num_head": 1,
+            "breed": "Brangus",
+        })
+
+        self.assertEqual(listing_match(listing, config), (True, "match"))
+
+    def test_cow_calf_unit_matches_caf_only_profile(self):
+        config = make_config({
+            "include_commercial": False,
+            "include_breeding_females": False,
+            "include_cow_calf_units": True,
+            "target_classes": [],
+            "target_sex": "",
+            "sale_types": [],
+            "target_breeds": ["brangus"],
+            "min_head": 1,
+            "max_head": 30,
+            "require_EU": False,
+            "require_NE": False,
+            "exclude_WHP": False,
+            "require_HGP_free": False,
+            "require_polled": False,
+            "require_quiet": False,
+        })
+        listing = make_listing({
+            "listing_type": "stud",
+            "listing_category": "cow_calf_unit",
+            "title": "PROMISED LAND PRUE V51",
+            "class": "cow-and-calf",
+            "sex": "cow",
+            "num_head": 1,
+            "breed": "Brangus",
+        })
+
+        self.assertEqual(listing_match(listing, config), (True, "match"))
 
 
 if __name__ == "__main__":

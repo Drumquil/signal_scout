@@ -7,6 +7,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.runtime_cache/
 
 # Local assistant/editor settings
 .claude/settings.local.json
@@ -41,6 +42,9 @@ authorized_notice_raw/*
 authorized_notice_samples/*
 !authorized_notice_samples/README.md
 !authorized_notice_samples/ktn_atom_item_normalized_example.json
+
+# Runtime scrape cache
+.runtime_cache/
 
 # ICM stage outputs are intentional repo artifacts; ad hoc temp extracts are not.
 .tmp_*.txt

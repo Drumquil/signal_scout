@@ -2,7 +2,7 @@ import unittest
 
 from bs4 import BeautifulSoup
 
-from cattle_scout import scrape_commercial_listing
+from cattle_scout import scrape_commercial_listing, scrape_stud_listing
 
 
 COMMERCIAL_LISTING_HTML = """
@@ -204,6 +204,242 @@ class AuctionsPlusCommercialParserTests(unittest.TestCase):
         listing = scrape_commercial_listing("https://example.test/assessed/4", soup, soup.get_text(separator="\n", strip=True))
 
         self.assertFalse(listing["is_EU"])
+
+    def test_stud_female_listing_is_not_forced_to_bull(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND PRUE V47</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <section>
+              <div>Female Sale</div>
+              <div>Brangus female donor dam. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/the-grafton-angus-brangus-bull-female-sale/promised-land-prue-v47/listing/128488-1384685/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_type"], "stud")
+        self.assertEqual(listing["listing_category"], "breeding_female")
+        self.assertEqual(listing["class"], "cow")
+        self.assertEqual(listing["breed"], "Brangus")
+        self.assertEqual(listing["horn_status"], "polled")
+
+    def test_bull_in_bull_female_sale_is_not_classified_as_female_from_url(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND BRANGUS BULL V12</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <section>
+              <div>The Grafton Angus Brangus Bull Female Sale</div>
+              <div>Registered Brangus bull with EBV data. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/the-grafton-angus-brangus-bull-female-sale/promised-land-bull-v12/listing/128488-1384686/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_type"], "stud")
+        self.assertEqual(listing["listing_category"], "bull")
+        self.assertEqual(listing["class"], "bull")
+        self.assertEqual(listing["breed"], "Brangus")
+
+    def test_explicit_male_field_beats_mixed_sale_female_heading(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND V12</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <ap-read-more field-id="Sex" text="Male"></ap-read-more>
+            <ap-read-more field-id="Breed" text="Brangus"></ap-read-more>
+            <section>
+              <div>The Grafton Angus Brangus Bull Female Sale</div>
+              <div>Dam: Promise Land Cow Family. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/the-grafton-angus-brangus-bull-female-sale/promised-land-v12/listing/128488-1384687/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "bull")
+        self.assertEqual(listing["class"], "bull")
+        self.assertEqual(listing["sex"], "bull")
+
+    def test_explicit_breed_field_beats_mixed_sale_breed_heading(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND PRUE V48</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <ap-read-more field-id="Sex" text="Female"></ap-read-more>
+            <ap-read-more field-id="Breed" text="Angus"></ap-read-more>
+            <section>
+              <div>The Grafton Angus Brangus Bull Female Sale</div>
+              <div>Joined Angus female. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/the-grafton-angus-brangus-bull-female-sale/promised-land-prue-v48/listing/128488-1384688/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "breeding_female")
+        self.assertEqual(listing["breed"], "Angus")
+
+    def test_breed_fallback_ignores_mixed_sale_heading_without_explicit_field(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND ANGUS PRUE V49</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <section>
+              <div>The Grafton Angus Brangus Bull Female Sale</div>
+              <div>Joined female. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/the-grafton-angus-brangus-bull-female-sale/promised-land-angus-prue-v49/listing/128488-1384689/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "breeding_female")
+        self.assertEqual(listing["breed"], "Angus")
+
+    def test_location_cowra_does_not_create_cow_category_without_animal_evidence(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND V50</div>
+            <ap-read-more field-id="Location" text="COWRA, Central West NSW"></ap-read-more>
+            <section>
+              <div>Individual animal profile. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/promise-land-genetics/promised-land-v50/listing/128488-1384690/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "stud")
+        self.assertEqual(listing["class"], "unknown")
+
+    def test_line_level_male_evidence_beats_cow_family_fallback_text(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND V52</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <section>
+              <div>Male</div>
+              <div>Out of an elite cow family. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/brangus-genetics/promised-land-v52/listing/128488-1384692/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "bull")
+        self.assertEqual(listing["class"], "bull")
+
+    def test_cow_family_pedigree_text_alone_does_not_create_cow_category(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND V53</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <section>
+              <div>Out of an elite cow-family. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/brangus-genetics/promised-land-v53/listing/128488-1384694/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "stud")
+        self.assertEqual(listing["class"], "unknown")
+
+    def test_explicit_cow_calf_class_becomes_cow_calf_unit(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND PRUE V51</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <ap-read-more field-id="Sex" text="Female"></ap-read-more>
+            <ap-read-more field-id="Class" text="Cow & Calf"></ap-read-more>
+            <ap-read-more field-id="Breed" text="Brangus"></ap-read-more>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/brangus-female-sale/promised-land-prue-v51/listing/128488-1384691/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "cow_calf_unit")
+        self.assertEqual(listing["class"], "cow-and-calf")
+
+    def test_plural_cows_calves_text_becomes_cow_calf_unit(self):
+        html = """
+        <html>
+          <body>
+            <div class="text-headline-sm font-medium">PROMISED LAND COWS AND CALVES</div>
+            <ap-read-more field-id="Location" text="GRAFTON, Northern Rivers NSW"></ap-read-more>
+            <section>
+              <div>Cows & Calves. Brangus. Polled.</div>
+            </section>
+          </body>
+        </html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        listing = scrape_stud_listing(
+            "https://auctionsplus.com.au/auctions/cattle/brangus-female-sale/promised-land-cows-calves/listing/128488-1384693/browse",
+            soup,
+            soup.get_text(separator="\n", strip=True),
+        )
+
+        self.assertEqual(listing["listing_category"], "cow_calf_unit")
+        self.assertEqual(listing["class"], "cow-and-calf")
 
 
 if __name__ == "__main__":

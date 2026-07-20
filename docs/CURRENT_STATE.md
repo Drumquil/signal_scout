@@ -41,6 +41,12 @@ Stabilise the Signal Scout beta runtime for the AuctionsPlus-first workflow.
   `authorized_notice_raw/` for mailbox/PDF exports,
   `transform_authorized_notices.py` for normalisation, and
   `validate_authorized_notice_samples.py` for intake checks before runtime use.
+- First self-serve authorised-source subscriptions were registered on
+  19 July 2026 for Nutrien livestock/sales pages, Donovan mailing list,
+  Ramsey & Bulmer livestock sales, and APL Casino livestock updates. The
+  working register is now
+  `references/operations/authorized_subscription_register.csv`; all four are
+  waiting on first real source emails before parser or runtime work.
 - Concrete beta rollout materials now exist:
   `docs/beta-sequence.md`,
   `docs/beta-user-guide.md`, and
@@ -71,31 +77,81 @@ Stabilise the Signal Scout beta runtime for the AuctionsPlus-first workflow.
   "test_*.py"`) before the scheduled scraper. Live Google Sheets and Twilio
   checks have been renamed to `smoke_sheets.py` and `smoke_twilio.py` so they
   are run deliberately, not by unit discovery.
+- A supervised live sandbox run on 6 July 2026 completed successfully with six
+  dummy profiles: AuctionsPlus-only, 164 listings scraped, 15 `WATCHING` rows
+  written, 0 `ALERTED`, and no observed Twilio send failures.
+- Those six dummy/self-test profiles (`tom_steers`, `tomcows`, `steers`,
+  `breeding_heifers`, `breeding_cows`, `caf`) were deactivated in
+  `cattle_scout_config` on 19 July 2026 before first real tester onboarding.
+- First real tester onboarding started on 19 July 2026 with Tom as a supervised
+  sandbox tester for a Brangus breeding-cow / cow-calf-unit buying brief:
+  Northern Rivers NSW focus, 1-30 head, age range 36-72 months, polled
+  required, Brangus / Ultrablack and primary crosses. Live form row 6 was
+  previewed with `transform_form_response.py --dry-run` and written to
+  `cattle_scout_config` as `tom_brangus_cows_and_calves`.
+- Tom's first tester profile is intentionally strict: cows and cow-calf units
+  only, not PTIC/joined heifers. Location filtering is moving to the
+  AuctionsPlus-style town-plus-radius model (`target_location_town` +
+  `target_radius_km`) rather than selecting individual saleyards directly.
+- Twilio sandbox delivery was confirmed on 19 July 2026 after the first tester
+  rejoined the sandbox and received a retry smoke message. Sandbox remains
+  acceptable for this one supervised tester, but a registered WhatsApp sender
+  is still recommended before expanding to a 3-5 tester cohort.
+- A supervised first-tester `TEST_MODE=TRUE` run completed on 19 July 2026 with
+  only `tom_brangus_cows_and_calves` active and `auctionsplus` as the only
+  enabled source: 164 listings discovered and scraped, 0 `TEST_WATCHING`, 0
+  `TEST_ALERTED`, and no runtime errors. The run showed the current brief is
+  narrow enough that no current AuctionsPlus listing matched.
+- Runtime performance and cadence work was implemented on 20 July 2026:
+  AuctionsPlus detail scraping now has opt-in local caching, env-configurable
+  worker concurrency, staggered request starts, 15-minute pending-catalogue
+  cache TTLs, and 3-hour released-listing cache TTLs; GitHub Actions now
+  supports manual post-form runs with runtime inputs (`TARGET_USER_ID`,
+  `FORCE_REFRESH`, pages, workers, and delay), overlap prevention, timeout
+  control, and heavier Thu/Fri/Sat daylight cadence. This still needs one supervised
+  `TEST_MODE=TRUE` validation run before relying on it for beta operations.
+- Stud/genetics parsing was tightened on 20 July 2026 so female-sale listings
+  are no longer flattened into bulls. `listing_type="stud"` can now flow
+  through `breeding_female`, `cow_calf_unit`, or `bull` category gates, with
+  known breeds still checked against buyer breed preferences.
+- A website/form UX plan now exists in `docs/website-form-ux-plan.md`, but
+  implementation is intentionally behind runtime validation.
+- The valuation model remains intentionally deferred; runtime operation is
+  currently acceptable with `No valuation`, but this decision should be
+  revisited fortnightly during beta until model work is deliberately scheduled.
 
 ## Active Beta Blockers
 
 - `TEST_MODE` defaults to `True`; production/live beta sends require explicitly
   setting `TEST_MODE=FALSE` in the runtime environment.
-- No first trusted tester has been chosen and onboarded yet.
-- The first live WhatsApp beta send has not been supervised end to end yet.
+- First trusted tester has been chosen, live form submission has been written
+  to config, WhatsApp sandbox delivery is confirmed, and a supervised
+  `TEST_MODE=TRUE` run completed cleanly; the first intentional live
+  `TEST_MODE=FALSE` alert run still has not been supervised end to end.
+- No external beta tester has yet been supervised through the full first live
+  WhatsApp flow end to end.
 - Beta guide and feedback process drafts now exist, but they still need to be
   exercised with a real tester.
+- New scrape cache/concurrency and stud-female classification changes need a
+  supervised `TEST_MODE=TRUE` run before the first intentional live send.
 
 ## Immediate Next Actions
 
 1. Use `docs/beta-sequence.md` as the operating order:
    test with real users before source outreach, then tighten for demo
    readiness, then start source-permission conversations.
-2. Choose the first trusted beta tester and onboard them end to end via the
-   live form and current config pipeline.
+2. Run one supervised `TEST_MODE=TRUE` validation pass with the new
+   cache/concurrency path enabled (`SCRAPE_WORKERS=4`, `REQUEST_DELAY=1`) and
+   confirm the stud/female classification output looks sane.
 3. Use `docs/first-beta-launch-pack.md` to send the outreach, onboarding, and
    launch-day messages in a controlled order.
 4. Set `TEST_MODE=FALSE` only when that first live beta send is being started
    intentionally.
 5. Capture feedback through the process in `docs/beta-feedback-process.md`.
-6. Create the dedicated Google Workspace alert mailbox and collect the first
-   real authorised-source samples in parallel, but do not treat source outreach
-   as the main priority before beta evidence exists.
+6. Keep the authorised-source mailbox organised by source label/folder and
+   capture the first real Nutrien, Donovan, Ramsey & Bulmer, and APL Casino
+   emails into `authorized_notice_raw/` for normalisation; do not treat source
+   outreach as the main priority before beta evidence exists.
 7. Keep `Stockplace` behind its feature gate until live sampling produces
    useful `WATCHING` rows at acceptable noise levels.
 8. Treat `RMA`, authorised email intake, and platform outreach candidates such
